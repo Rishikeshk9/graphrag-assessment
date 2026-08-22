@@ -42,6 +42,8 @@ class IngestionJobs:
 
         try:
             result = await self.ingestion.ingest(documents, report_progress=report)
-            await self._update(job_id, **result.model_dump(exclude={"job_id"}), status="completed", phase="completed")
+            completed = result.model_dump(exclude={"job_id"})
+            completed.update(status="completed", phase="completed")
+            await self._update(job_id, **completed)
         except Exception as error:
             await self._update(job_id, status="failed", phase="failed", warnings=[f"Ingestion failed: {type(error).__name__}"])
