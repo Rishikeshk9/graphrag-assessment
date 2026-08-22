@@ -1,0 +1,23 @@
+# Python
+backend/.venv/
+**/__pycache__/
+**/.pytest_cache/
+*.py[cod]
+
+# JavaScript
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local configuration and runtime data
+.env
+**/.env
+*.log
+qdrant_data/
+neo4j_data/
+ollama_data/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
