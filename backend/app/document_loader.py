@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 
 from pypdf import PdfReader
 
 from app.schemas import DocumentInput
-
 
 MAX_PDF_BYTES = 20 * 1024 * 1024
 SOURCE_ID_PATTERN = re.compile(r"[^a-zA-Z0-9_-]+")
@@ -22,6 +22,10 @@ def source_id_from_filename(filename: str) -> str:
     stem = filename.rsplit(".", 1)[0].strip().lower()
     source_id = SOURCE_ID_PATTERN.sub("-", stem).strip("-")
     return source_id[:128] or "uploaded-document"
+
+
+def file_sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
 
 
 def extract_pdf_document(filename: str, payload: bytes) -> DocumentInput:
@@ -43,5 +47,6 @@ def extract_pdf_document(filename: str, payload: bytes) -> DocumentInput:
     return DocumentInput(
         source_id=source_id_from_filename(filename),
         content=content,
+        file_sha256=file_sha256(payload),
         metadata={"filename": filename, "file_type": "application/pdf", "pages": str(len(pages))},
     )

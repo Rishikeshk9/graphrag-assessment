@@ -2,11 +2,17 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.13.4
     ports:
-      - "6333:6333"
+      - "6343:6333"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:6333/healthz"]
+      # The Qdrant image ships neither curl nor wget, so probe the REST port
+      # with bash's /dev/tcp redirection instead.
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"
       interval: 10s
       timeout: 5s
       retries: 10
@@ -16,8 +22,8 @@ services:
     environment:
       NEO4J_AUTH: neo4j/local-rag-password
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "7475:7474"
+      - "7690:7687"
     volumes:
       - neo4j_data:/data
     healthcheck:
@@ -36,10 +42,21 @@ services:
       # Ollama remains on the host so the local model weights are never copied
       # into a container image.
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      # Embeddings and answers stay local; the graph extractor is an optional
+      # OpenRouter structured-output model selected with these variables.
+      GRAPH_EXTRACTION_PROVIDER: ${GRAPH_EXTRACTION_PROVIDER:-ollama}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_EMBEDDING_MODEL: ${OPENROUTER_EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b:free}
+      OPENROUTER_CHAT_MODEL: ${OPENROUTER_CHAT_MODEL:-stealth/ox-alpha}
+      OPENROUTER_GRAPH_MODEL: ${OPENROUTER_GRAPH_MODEL:-stealth/ox-alpha}
+      OPENROUTER_GRAPH_RESPONSE_FORMAT: ${OPENROUTER_GRAPH_RESPONSE_FORMAT:-json_object}
+      OPENROUTER_SITE_URL: ${OPENROUTER_SITE_URL:-http://127.0.0.1:5173}
+      OPENROUTER_APP_NAME: GraphRAG Assessment
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8080:8080"
+      - "8090:8080"
     depends_on:
       qdrant:
         condition: service_healthy
@@ -62,7 +79,7 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost/"]
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -72,6 +89,8 @@ services:
   ollama:
     image: ollama/ollama:latest
     profiles: ["ollama"]
+    ports:
+      - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
 

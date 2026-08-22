@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from typing import Protocol
 
 from app.embeddings import EmbeddingProvider
 from app.graph import GraphFact, GraphStore
@@ -72,23 +71,36 @@ class RetrievalService:
             source_child_chunk_id=fact.child_chunk_id,
             source_id=fact.source_id,
             evidence=fact.evidence,
+            source_ids=list(fact.source_ids),
+            supporting_child_chunk_ids=list(fact.supporting_child_chunk_ids),
         )
 
     async def subgraph(self, request: RetrievalRequest) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        response = await self.retrieve(request)
+        """Traverse the graph only: visualization never needs the vector path."""
+        facts = await self.graph_store.traverse(
+            request.query, request.graph_hops, request.graph_limit
+        )
         nodes: dict[str, dict[str, str]] = {}
         edges: list[dict[str, str]] = []
-        for index, triple in enumerate(response.graph_triples):
-            nodes.setdefault(triple.subject, {"id": triple.subject, "label": triple.subject})
-            nodes.setdefault(triple.object, {"id": triple.object, "label": triple.object})
+        for index, fact in enumerate(facts):
+            nodes.setdefault(
+                fact.source, {"id": fact.source, "label": fact.source, "type": fact.source_type}
+            )
+            nodes.setdefault(
+                fact.target, {"id": fact.target, "label": fact.target, "type": fact.target_type}
+            )
             edges.append(
                 {
-                    "id": f"{index}:{triple.source_child_chunk_id}",
-                    "source": triple.subject,
-                    "target": triple.object,
-                    "label": triple.predicate,
-                    "parent_chunk_id": triple.source_parent_chunk_id,
-                    "child_chunk_id": triple.source_child_chunk_id,
+                    "id": f"{index}:{fact.child_chunk_id}",
+                    "source": fact.source,
+                    "target": fact.target,
+                    "label": fact.relationship_type,
+                    "evidence": fact.evidence,
+                    "source_id": fact.source_id,
+                    "parent_chunk_id": fact.parent_chunk_id,
+                    "child_chunk_id": fact.child_chunk_id,
+                    "supporting_sources": str(len(set(fact.source_ids))),
+                    "supporting_chunks": str(len(fact.supporting_child_chunk_ids)),
                 }
             )
         return list(nodes.values()), edges

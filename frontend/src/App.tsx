@@ -1,13 +1,17 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Database,
   FileText,
+  Menu,
   Network,
+  RotateCcw,
   Send,
-  Sparkles,
+  Settings,
+  Trash2,
   Upload,
   WandSparkles,
+  X,
 } from "lucide-react";
 import AnswerContent from "./AnswerContent";
 import GraphInspector from "./GraphInspector";
@@ -24,165 +28,423 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import type { Citation, GraphTriple, ParentContext } from "./types";
+import {
+  fetchModelProviders,
+  fetchKnowledgeBaseUsage,
+  cancelIngestion,
+  clearKnowledgeBase,
+  ingestPdf,
+  type ModelProvider,
+  type KnowledgeBaseUsage,
+  streamChat,
+  subgraphFromTriples,
+} from "@/lib/api";
+import type {
+  ChatMessage,
+  ChatTurn,
+  Citation,
+  GraphTriple,
+  ParentContext,
+  Subgraph,
+} from "./types";
 
-const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8081/api/v1";
+const EMPTY_SUBGRAPH: Subgraph = { nodes: [], edges: [] };
+const EMPTY_KNOWLEDGE_BASE_USAGE: KnowledgeBaseUsage = {
+  qdrant_parent_vectors: 0,
+  qdrant_child_vectors: 0,
+  neo4j_entities: 0,
+  neo4j_relationships: 0,
+};
+const CHAT_STORAGE_KEY = "graphrag-assessment.chat.v1";
+const SUBGRAPH_STORAGE_KEY = "graphrag-assessment.subgraph.v1";
 
-function parseSse(frame: string) {
-  const event = frame.match(/^event: (.+)$/m)?.[1];
-  const raw = frame.match(/^data: (.*)$/m)?.[1];
-  return event && raw ? { event, data: JSON.parse(raw) } : null;
+function readStoredChat(): ChatMessage[] {
+  try {
+    const value = globalThis.localStorage?.getItem(CHAT_STORAGE_KEY);
+    const parsed: unknown = value ? JSON.parse(value) : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is ChatMessage =>
+      typeof item === "object" && item !== null && "id" in item && "role" in item && "content" in item,
+    ) : [];
+  } catch {
+    return [];
+  }
+}
+
+function readStoredSubgraph(): Subgraph {
+  try {
+    const value = globalThis.localStorage?.getItem(SUBGRAPH_STORAGE_KEY);
+    const parsed: unknown = value ? JSON.parse(value) : null;
+    if (typeof parsed === "object" && parsed !== null && "nodes" in parsed && "edges" in parsed) {
+      const graph = parsed as Subgraph;
+      return Array.isArray(graph.nodes) && Array.isArray(graph.edges) ? graph : EMPTY_SUBGRAPH;
+    }
+  } catch {
+    // Invalid or unavailable browser storage should never prevent the app loading.
+  }
+  return EMPTY_SUBGRAPH;
+}
+
+function clearStoredSession() {
+  try {
+    globalThis.localStorage?.removeItem(CHAT_STORAGE_KEY);
+    globalThis.localStorage?.removeItem(SUBGRAPH_STORAGE_KEY);
+  } catch {
+    // Browser privacy settings can disable storage; the in-memory reset still works.
+  }
+}
+
+function newId() {
+  return globalThis.crypto?.randomUUID?.() ?? String(Date.now() + Math.random());
+}
+
+function messageTime(timestamp?: string) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
 export default function App() {
-  const [question, setQuestion] = useState("Who acquired Activision Blizzard?");
-  const [answer, setAnswer] = useState("");
-  const [sources, setSources] = useState<Citation[]>([]);
-  const [parents, setParents] = useState<ParentContext[]>([]);
-  const [triples, setTriples] = useState<GraphTriple[]>([]);
+  const [question, setQuestion] = useState("What relationships are described in my documents?");
+  const [messages, setMessages] = useState<ChatMessage[]>(readStoredChat);
+  const [subgraph, setSubgraph] = useState<Subgraph>(readStoredSubgraph);
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState("");
   const [uploadStatus, setUploadStatus] = useState("");
+  const [isIndexing, setIsIndexing] = useState(false);
+  const [llmProvider, setLlmProvider] = useState<ModelProvider>("local");
+  const [openRouterConfigured, setOpenRouterConfigured] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearingKnowledgeBase, setClearingKnowledgeBase] = useState(false);
+  const [confirmClearBrowser, setConfirmClearBrowser] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState("");
+  const [knowledgeBaseUsage, setKnowledgeBaseUsage] = useState<KnowledgeBaseUsage | null>(null);
+  const [loadingKnowledgeBaseUsage, setLoadingKnowledgeBaseUsage] = useState(false);
+  const streamRef = useRef<AbortController | null>(null);
+  const ingestionRef = useRef<{
+    controller: AbortController;
+    jobId?: string;
+  } | null>(null);
+  const threadEnd = useRef<HTMLDivElement>(null);
 
-  const sourceCount = useMemo(
-    () => new Set(sources.map((source) => source.source_id)).size,
-    [sources],
+  const lastAnswer = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "assistant"),
+    [messages],
   );
+  const sources = lastAnswer?.sources ?? [];
+  const parents = lastAnswer?.parents ?? [];
+  const triples = lastAnswer?.triples ?? [];
+  const sourceCount = useMemo(
+    () => new Set((lastAnswer?.sources ?? []).map((source) => source.source_id)).size,
+    [lastAnswer],
+  );
+  const loading = status.includes("Retrieving") || status.includes("Generating");
 
-  async function submitQuestion(event: FormEvent) {
-    event.preventDefault();
-    if (!question.trim()) return;
-    setAnswer("");
-    setSources([]);
-    setParents([]);
-    setTriples([]);
+  useEffect(() => {
+    threadEnd.current?.scrollIntoView({ block: "end" });
+  }, [messages]);
+
+  useEffect(() => () => streamRef.current?.abort(), []);
+
+  useEffect(() => {
+    try {
+      const completedMessages = messages.filter((message) => message.status !== "streaming");
+      if (completedMessages.length === 0) globalThis.localStorage?.removeItem(CHAT_STORAGE_KEY);
+      else globalThis.localStorage?.setItem(CHAT_STORAGE_KEY, JSON.stringify(completedMessages));
+    } catch {
+      // Chat still works when the browser has no writable localStorage.
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    try {
+      if (subgraph.nodes.length === 0 && subgraph.edges.length === 0) {
+        globalThis.localStorage?.removeItem(SUBGRAPH_STORAGE_KEY);
+      } else {
+        globalThis.localStorage?.setItem(SUBGRAPH_STORAGE_KEY, JSON.stringify(subgraph));
+      }
+    } catch {
+      // Graph inspection remains usable in-memory if persistence is unavailable.
+    }
+  }, [subgraph]);
+
+  useEffect(() => {
+    void fetchModelProviders()
+      .then((providers) => {
+        setLlmProvider(providers.default_provider);
+        setOpenRouterConfigured(providers.openrouter_configured);
+      })
+      .catch(() => {
+        // Local inference remains available even if provider metadata cannot load.
+        setOpenRouterConfigured(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    setLoadingKnowledgeBaseUsage(true);
+    void fetchKnowledgeBaseUsage()
+      .then(setKnowledgeBaseUsage)
+      .catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load knowledge-base usage"))
+      .finally(() => setLoadingKnowledgeBaseUsage(false));
+  }, [settingsOpen]);
+
+  function updateAnswer(id: string, change: Partial<ChatMessage>) {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === id ? { ...message, ...change } : message,
+      ),
+    );
+  }
+
+  function appendToken(id: string, token: string) {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === id
+          ? { ...message, content: message.content + token }
+          : message,
+      ),
+    );
+  }
+
+  async function sendQuestion(query: string, priorMessages: ChatMessage[] = messages) {
+    if (!query || loading) return;
+
+    streamRef.current?.abort();
+    const controller = new AbortController();
+    streamRef.current = controller;
+
+    const history: ChatTurn[] = priorMessages
+      .filter((message) => message.content.trim())
+      .slice(-6)
+      .map(({ role, content }) => ({ role, content }));
+    const answerId = newId();
+    const sentAt = new Date().toISOString();
+    setMessages([
+      ...priorMessages,
+      { id: newId(), role: "user", content: query, timestamp: sentAt },
+      { id: answerId, role: "assistant", content: "", status: "streaming" },
+    ]);
     setError("");
     setStatus("Retrieving vector and graph evidence…");
+
+    let streamed: GraphTriple[] = [];
+    let responseFailed = false;
     try {
-      const response = await fetch(`${API}/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: question, graph_hops: 2 }),
-      });
-      if (!response.ok || !response.body)
-        throw new Error(`Chat request failed (${response.status})`);
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-        for (const frame of frames) {
-          const parsed = parseSse(frame);
-          if (!parsed) continue;
-          if (parsed.event === "sources") setSources(parsed.data);
-          if (parsed.event === "parents") setParents(parsed.data);
-          if (parsed.event === "graph") {
-            setTriples(parsed.data);
+      await streamChat(
+        { query, history, llmProvider },
+        {
+          onSources: (value: Citation[]) => updateAnswer(answerId, { sources: value }),
+          onParents: (value: ParentContext[]) =>
+            updateAnswer(answerId, { parents: value }),
+          onGraph: (value: GraphTriple[]) => {
+            streamed = value;
+            updateAnswer(answerId, { triples: value });
             setStatus("Generating cited answer…");
-          }
-          if (parsed.event === "token")
-            setAnswer((current) => current + parsed.data);
-          if (parsed.event === "error") setError(parsed.data);
-          if (parsed.event === "done") setStatus("Complete");
-        }
-        if (done) break;
-      }
-    } catch (caught) {
-      setError(
-        caught instanceof Error ? caught.message : "Chat request failed",
+          },
+          onToken: (token: string) => appendToken(answerId, token),
+          onError: (message: string) => {
+            responseFailed = true;
+            setError(message);
+            updateAnswer(answerId, { status: "failed", timestamp: new Date().toISOString() });
+          },
+          onDone: () => setStatus(responseFailed ? "Failed" : "Complete"),
+        },
+        { signal: controller.signal },
       );
+      if (!responseFailed) {
+        updateAnswer(answerId, { status: "complete", timestamp: new Date().toISOString() });
+      }
+      // The inspector must show the same graph evidence that was supplied to
+      // the model, not a second broad traversal that can contain extra edges.
+      setSubgraph(subgraphFromTriples(streamed));
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      setError(caught instanceof Error ? caught.message : "Chat request failed");
+      updateAnswer(answerId, { status: "failed", timestamp: new Date().toISOString() });
       setStatus("Failed");
     }
   }
 
+  async function submitQuestion(event: FormEvent) {
+    event.preventDefault();
+    const query = question.trim();
+    if (!query) return;
+    setQuestion("");
+    await sendQuestion(query);
+  }
+
+  function resendFailedMessage(failedAnswerId: string) {
+    const failedAnswerIndex = messages.findIndex((message) => message.id === failedAnswerId);
+    if (failedAnswerIndex < 1) return;
+    const failedQuestionIndex = messages
+      .slice(0, failedAnswerIndex)
+      .map((message) => message.role)
+      .lastIndexOf("user");
+    if (failedQuestionIndex < 0) return;
+
+    const failedQuestion = messages[failedQuestionIndex];
+    const priorMessages = messages.slice(0, failedQuestionIndex);
+    // Replace the failed request pair rather than appending a duplicate turn.
+    void sendQuestion(failedQuestion.content, priorMessages);
+  }
+
   async function uploadPdf(file?: File) {
     if (!file) return;
+    const controller = new AbortController();
+    ingestionRef.current = { controller };
+    setIsIndexing(true);
     setUploadStatus(`Queued ${file.name}…`);
     setError("");
     try {
-      const form = new FormData();
-      form.append("file", file);
-      const response = await fetch(`${API}/ingest/file`, {
-        method: "POST",
-        body: form,
-      });
-      const job = await response.json();
-      if (!response.ok) throw new Error(job.detail ?? "Upload failed");
-      while (true) {
-        const statusResponse = await fetch(`${API}/ingest/${job.job_id}`);
-        const result = await statusResponse.json();
-        if (!statusResponse.ok)
-          throw new Error(result.detail ?? "Could not read indexing progress");
-        if (result.status === "completed") {
-          setUploadStatus(
-            `Indexed ${result.child_chunks_indexed} child chunks and ${result.graph_relationships_indexed} graph relationships.`,
-          );
-          break;
-        }
-        if (result.status === "failed")
-          throw new Error(result.warnings?.[0] ?? "Indexing failed");
-        const progress = result.graph_children_total
-          ? ` ${result.graph_children_processed}/${result.graph_children_total} chunks`
+      const result = await ingestPdf(file, (job) => {
+        const progress = job.graph_children_total
+          ? ` ${job.graph_children_processed}/${job.graph_children_total} chunks`
           : "";
-        setUploadStatus(
-          `${result.phase[0].toUpperCase()}${result.phase.slice(1)} ${file.name}…${progress}`,
-        );
-        await new Promise((resolve) => window.setTimeout(resolve, 1200));
-      }
+        const phase = job.phase
+          ? `${job.phase[0].toUpperCase()}${job.phase.slice(1)}`
+          : "Indexing";
+        setUploadStatus(`${phase} ${file.name}…${progress}`);
+      }, {
+        llmProvider,
+        signal: controller.signal,
+        onStarted: (job) => {
+          if (ingestionRef.current?.controller === controller) {
+            ingestionRef.current.jobId = job.job_id;
+          }
+        },
+      });
+      setUploadStatus(
+        `Indexed ${result.child_chunks_indexed} child chunks and ${result.graph_relationships_indexed} graph relationships.`,
+      );
     } catch (caught) {
+      if (controller.signal.aborted) {
+        setUploadStatus("Indexing cancelled.");
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Upload failed");
       setUploadStatus("");
+    } finally {
+      if (ingestionRef.current?.controller === controller) {
+        ingestionRef.current = null;
+      }
+      setIsIndexing(false);
     }
   }
 
-  const loading =
-    status.includes("Retrieving") || status.includes("Generating");
+  async function cancelIndexing() {
+    const active = ingestionRef.current;
+    if (!active) return;
+    setUploadStatus("Cancelling indexing…");
+    active.controller.abort();
+    if (!active.jobId) return;
+    try {
+      await cancelIngestion(active.jobId);
+      setUploadStatus("Indexing cancelled.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not cancel indexing");
+    }
+  }
+
+  async function clearAllKnowledgeBaseData() {
+    setClearingKnowledgeBase(true);
+    setError("");
+    try {
+      const result = await clearKnowledgeBase();
+      clearStoredSession();
+      setMessages([]);
+      setSubgraph(EMPTY_SUBGRAPH);
+      setKnowledgeBaseUsage(EMPTY_KNOWLEDGE_BASE_USAGE);
+      const notice = `Knowledge base and saved browser evidence cleared: ${result.vectors_removed} vectors, ${result.relationships_removed} relationships, and ${result.entities_removed} entities removed.`;
+      setUploadStatus(notice);
+      setSettingsNotice(notice);
+      setConfirmClear(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not clear the knowledge base");
+    } finally {
+      setClearingKnowledgeBase(false);
+    }
+  }
+
+  function clearBrowserSession() {
+    clearStoredSession();
+    setMessages([]);
+    setSubgraph(EMPTY_SUBGRAPH);
+    setConfirmClearBrowser(false);
+    setSettingsNotice("Saved chat history and graph evidence were cleared from this browser. Qdrant and Neo4j were not changed.");
+  }
 
   return (
     <main className="dark min-h-screen bg-background text-foreground">
-      <div className="pointer-events-none fixed inset-x-0 top-0 h-100 bg-[radial-gradient(ellipse_at_top,oklch(0.3_0.08_248/.45),transparent_65%)]" />
-      <section className="relative mx-auto max-w-7xl px-5 py-8 md:px-8 md:py-12">
-        <header className="mb-8 flex flex-col justify-between gap-6 border-b pb-8 md:flex-row md:items-end">
+      <div className="pointer-events-none fixed inset-0 grid-noise" />
+      <section className="relative mx-auto max-w-7xl px-4 py-5 sm:px-6 sm:py-6 md:px-8 md:py-8">
+        <div className="mb-7 flex items-center justify-between border-b border-foreground/15 pb-4 text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase sm:mb-10">
+          <span>Rushikesh K</span>
+          <span className="hidden items-center gap-2 sm:flex"><span className="size-1.5 rounded-full bg-primary" /> All systems local</span>
+        </div>
+        <header className="mb-7 flex flex-col justify-between gap-6 border-b border-foreground/15 pb-8 sm:mb-9 md:flex-row md:items-end md:pb-10">
           <div className="max-w-2xl">
-            <Badge
+            <Button
+              type="button"
               variant="outline"
-              className="mb-4 border-primary/35 bg-primary/10 px-2.5 text-primary"
+              size="icon"
+              className="mb-5 rounded-full border-foreground/20 bg-transparent hover:bg-foreground hover:text-background"
+              aria-label="Open navigation"
+              onClick={() => setSidebarOpen(true)}
             >
-              <Sparkles /> Local-first GraphRAG
-            </Badge>
-            <h1 className="text-3xl font-semibold tracking-tight md:text-5xl">
-              Evidence Studio
+              <Menu />
+            </Button>
+            <h1 className="max-w-xl text-5xl font-semibold tracking-[-0.065em] sm:text-6xl md:text-7xl">
+              Your documents.<br />
+              <span className="text-primary">Grounded answers.</span>
             </h1>
-            <p className="mt-4 text-base leading-7 text-muted-foreground md:text-lg">
-              Ask questions across your documents, inspect every source, and
-              follow entity relationships through the knowledge graph.
+            <p className="mt-5 max-w-lg text-base leading-7 text-muted-foreground md:text-lg">
+              Ask, verify, and traverse your knowledge base without losing the source behind the answer.
             </p>
           </div>
-          <Button
-            asChild
-            variant="outline"
-            className="h-10 border-dashed bg-card/60 px-4 hover:bg-accent"
-          >
-            <label className="cursor-pointer">
-              <Upload /> Add a PDF
-              <input
-                className="hidden"
-                type="file"
-                accept="application/pdf"
-                onChange={(event) => uploadPdf(event.target.files?.[0])}
-              />
-            </label>
-          </Button>
+          <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
+            <ProviderSwitch
+              provider={llmProvider}
+              openRouterConfigured={openRouterConfigured}
+              disabled={loading || isIndexing}
+              onChange={setLlmProvider}
+            />
+            <Button
+              asChild
+              variant="outline"
+              className="h-10 w-full rounded-md border-foreground/25 bg-transparent px-4 hover:border-primary hover:bg-primary hover:text-primary-foreground sm:w-auto"
+            >
+              <label className={isIndexing ? "cursor-not-allowed" : "cursor-pointer"}>
+                <Upload /> Add a PDF
+                <input
+                  className="hidden"
+                  type="file"
+                  accept="application/pdf"
+                  disabled={isIndexing}
+                  onChange={(event) => uploadPdf(event.target.files?.[0])}
+                />
+              </label>
+            </Button>
+          </div>
         </header>
 
         {uploadStatus && (
           <Alert className="mb-6 border-primary/25 bg-primary/8">
             <Database className="text-primary" />
             <AlertTitle>Knowledge-base update</AlertTitle>
-            <AlertDescription>{uploadStatus}</AlertDescription>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+              <span className="min-w-0 break-words">{uploadStatus}</span>
+              {isIndexing && (
+                <Button type="button" variant="outline" size="sm" onClick={cancelIndexing}>
+                  <X /> Cancel indexing
+                </Button>
+              )}
+            </AlertDescription>
           </Alert>
         )}
         {error && (
@@ -208,61 +470,20 @@ export default function App() {
           <Metric
             icon={<WandSparkles />}
             label="Inference mode"
-            value="Local"
-            detail="Ollama + Qdrant + Neo4j"
+            value={llmProvider === "openrouter" ? "OpenRouter" : "Local"}
+            detail={llmProvider === "openrouter" ? "Hosted LLMs + local retrieval" : "Ollama + local retrieval"}
           />
         </div>
 
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.18fr)_minmax(340px,.82fr)]">
+        <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.18fr)_minmax(340px,.82fr)]">
           <div className="space-y-6">
-            <Card className="border bg-card/90 shadow-2xl shadow-black/15">
-              <CardHeader>
-                <CardTitle>Ask your knowledge graph</CardTitle>
-                <CardDescription>
-                  Answers are grounded in retrieved document context and graph
-                  evidence.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form onSubmit={submitQuestion} className="space-y-4">
-                  <Textarea
-                    value={question}
-                    onChange={(event) => setQuestion(event.target.value)}
-                    className="min-h-30 resize-y bg-background text-base shadow-inner"
-                    placeholder="Ask a question about your indexed documents…"
-                  />
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <p className="text-xs text-muted-foreground">
-                      Source citations are included in every supported answer.
-                    </p>
-                    <Button
-                      type="submit"
-                      size="lg"
-                      disabled={loading || !question.trim()}
-                    >
-                      {loading ? (
-                        <>
-                          <span className="size-3 animate-pulse rounded-full bg-current" />{" "}
-                          Working…
-                        </>
-                      ) : (
-                        <>
-                          <Send /> Ask local model
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
-
-            <Card className="border bg-card/90">
-              <CardHeader className="border-b">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <CardTitle>Grounded answer</CardTitle>
+            <Card className="product-card border-foreground/15 bg-card/95 shadow-none">
+              <CardHeader className="border-b border-foreground/12">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <CardTitle>Conversation</CardTitle>
                     <CardDescription>
-                      Generated only after retrieval and graph traversal.
+                      Follow-up questions reuse the earlier turns for context.
                     </CardDescription>
                   </div>
                   <Badge
@@ -275,23 +496,101 @@ export default function App() {
                   </Badge>
                 </div>
               </CardHeader>
-              <CardContent className="pt-6">
-                <article className="answer-content text-[0.98rem] text-foreground md:text-[1.03rem]">
-                  {answer ? (
-                    <AnswerContent answer={answer} />
-                  ) : loading ? (
-                    <div className="space-y-3">
-                      <Skeleton className="h-5 w-full" />
-                      <Skeleton className="h-5 w-[91%]" />
-                      <Skeleton className="h-5 w-[70%]" />
-                    </div>
-                  ) : (
-                    <div className="py-7 text-muted-foreground">
+              <CardContent className="space-y-4 pt-6">
+                <div
+                  role="log"
+                  aria-label="Conversation"
+                  className="max-h-[60vh] space-y-4 overflow-y-auto pr-1 sm:max-h-[26rem]"
+                >
+                  {messages.length === 0 && (
+                    <p className="py-6 text-muted-foreground">
                       Ask a question to stream a cited answer from your local
                       knowledge base.
-                    </div>
+                    </p>
                   )}
-                </article>
+                  {messages.map((message) =>
+                    message.role === "user" ? (
+                      <div key={message.id} className="flex justify-end">
+                        <div className="max-w-[92%] sm:max-w-[85%]">
+                          <p className="break-words rounded-2xl rounded-br-sm bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground">
+                            {message.content}
+                          </p>
+                          <p className="mt-1 text-right text-[11px] text-muted-foreground">
+                            {messageTime(message.timestamp) ? `Sent · ${messageTime(message.timestamp)}` : "Sent"}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div key={message.id} className="max-w-full sm:max-w-[92%]">
+                        <article className="answer-content break-words rounded-2xl rounded-bl-sm border border-foreground/15 bg-background px-4 py-3 text-[0.98rem]">
+                          {message.content ? (
+                            <AnswerContent answer={message.content} />
+                          ) : (
+                            <div className="space-y-3 py-1">
+                              <Skeleton className="h-4 w-full" />
+                              <Skeleton className="h-4 w-[80%]" />
+                            </div>
+                          )}
+                        </article>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {message.status === "streaming"
+                            ? "Receiving…"
+                            : message.status === "failed"
+                              ? "Response failed"
+                              : messageTime(message.timestamp)
+                                ? `Received · ${messageTime(message.timestamp)}`
+                                : "Received"}
+                        </p>
+                        {message.status === "failed" && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="mt-2"
+                            onClick={() => resendFailedMessage(message.id)}
+                          >
+                            <RotateCcw /> Resend message
+                          </Button>
+                        )}
+                      </div>
+                    ),
+                  )}
+                  <div ref={threadEnd} />
+                </div>
+
+                <Separator />
+
+                <form onSubmit={submitQuestion} className="space-y-4">
+                  <Textarea
+                    value={question}
+                    onChange={(event) => setQuestion(event.target.value)}
+                    aria-label="Question"
+                    className="min-h-24 resize-y bg-background text-base shadow-inner"
+                    placeholder="Ask a question about your indexed documents…"
+                  />
+                  <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      Source citations are included in every supported answer.
+                    </p>
+                    <Button
+                      type="submit"
+                      size="lg"
+                      className="w-full sm:w-auto"
+                      disabled={loading || !question.trim()}
+                    >
+                      {loading ? (
+                        <>
+                          <span className="size-3 animate-pulse rounded-full bg-current" />{" "}
+                          Working…
+                        </>
+                      ) : (
+                        <>
+                          <Send /> Ask {llmProvider === "openrouter" ? "OpenRouter" : "local model"}
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </form>
               </CardContent>
             </Card>
 
@@ -302,22 +601,22 @@ export default function App() {
             />
           </div>
 
-          <aside>
-            <Card className="sticky top-6 border bg-card/90">
-              <CardHeader>
+          <aside className="min-w-0 self-start">
+            <Card className="product-card border-foreground/15 bg-card/95 shadow-none xl:sticky xl:top-6">
+              <CardHeader className="border-b border-foreground/12">
                 <CardTitle className="flex items-center gap-2">
                   <Network className="size-4 text-primary" /> Graph inspector
                 </CardTitle>
                 <CardDescription>
-                  Pan and zoom the relationships used for this answer.
+                  Pan and zoom the graph evidence supplied to this answer.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <GraphInspector triples={triples} />
+                <GraphInspector subgraph={subgraph} />
                 <Separator className="my-5" />
                 <div className="space-y-2.5">
                   {triples.length === 0 ? (
-                    <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                    <p className="rounded-sm border border-dashed p-4 text-sm text-muted-foreground">
                       Graph evidence will appear here after a supported
                       question.
                     </p>
@@ -325,7 +624,7 @@ export default function App() {
                     triples.map((triple, index) => (
                       <div
                         key={`${triple.source_child_chunk_id}-${index}`}
-                        className="rounded-lg border bg-background/55 p-3.5 text-sm"
+                        className="rounded-sm border border-foreground/12 bg-background p-3.5 text-sm break-words"
                       >
                         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
                           <span className="font-medium text-primary">
@@ -350,7 +649,247 @@ export default function App() {
           </aside>
         </div>
       </section>
+      <NavigationSidebar
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        onOpenSettings={() => {
+          setSettingsOpen(true);
+          setSidebarOpen(false);
+        }}
+      />
+      {settingsOpen && (
+        <SettingsPage
+          confirmClear={confirmClear}
+          clearing={clearingKnowledgeBase}
+          confirmClearBrowser={confirmClearBrowser}
+          notice={settingsNotice}
+          indexing={isIndexing}
+          usage={knowledgeBaseUsage}
+          loadingUsage={loadingKnowledgeBaseUsage}
+          onClose={() => {
+            setConfirmClear(false);
+            setConfirmClearBrowser(false);
+            setSettingsOpen(false);
+          }}
+          onRequestClear={() => setConfirmClear(true)}
+          onCancelClear={() => setConfirmClear(false)}
+          onConfirmClear={clearAllKnowledgeBaseData}
+          onRequestClearBrowser={() => setConfirmClearBrowser(true)}
+          onCancelClearBrowser={() => setConfirmClearBrowser(false)}
+          onConfirmClearBrowser={clearBrowserSession}
+        />
+      )}
     </main>
+  );
+}
+
+function NavigationSidebar({
+  open,
+  onClose,
+  onOpenSettings,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onOpenSettings: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50">
+      <Button
+        type="button"
+        aria-label="Close navigation"
+        variant="ghost"
+        className="absolute inset-0 h-full w-full rounded-none bg-black/60 hover:bg-black/60"
+        onClick={onClose}
+      />
+      <aside className="relative flex h-full w-[min(20rem,calc(100vw-1rem))] flex-col border-r bg-card p-4 shadow-2xl sm:p-5">
+        <div className="flex items-center justify-between">
+          <span className="font-semibold">Rushikesh K</span>
+          <Button type="button" variant="ghost" size="icon" aria-label="Close navigation" onClick={onClose}>
+            <X />
+          </Button>
+        </div>
+        <Separator className="my-5" />
+        <Button type="button" variant="secondary" className="justify-start" onClick={onOpenSettings}>
+          <Settings /> Settings
+        </Button>
+        <p className="mt-auto text-xs leading-5 text-muted-foreground">
+          Manage inference preferences and your local knowledge base.
+        </p>
+      </aside>
+    </div>
+  );
+}
+
+function SettingsPage({
+  confirmClear,
+  clearing,
+  confirmClearBrowser,
+  indexing,
+  notice,
+  usage,
+  loadingUsage,
+  onClose,
+  onRequestClear,
+  onCancelClear,
+  onConfirmClear,
+  onRequestClearBrowser,
+  onCancelClearBrowser,
+  onConfirmClearBrowser,
+}: {
+  confirmClear: boolean;
+  clearing: boolean;
+  confirmClearBrowser: boolean;
+  indexing: boolean;
+  notice: string;
+  usage: KnowledgeBaseUsage | null;
+  loadingUsage: boolean;
+  onClose: () => void;
+  onRequestClear: () => void;
+  onCancelClear: () => void;
+  onConfirmClear: () => void;
+  onRequestClearBrowser: () => void;
+  onCancelClearBrowser: () => void;
+  onConfirmClearBrowser: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 overflow-y-auto bg-background/95 px-4 py-5 backdrop-blur-sm sm:px-6 sm:py-8 md:px-8 md:py-12">
+      <section className="mx-auto max-w-3xl">
+        <div className="mb-6 flex items-start justify-between gap-3 sm:mb-8 sm:gap-4">
+          <div className="min-w-0">
+            <Badge variant="outline" className="mb-3 border-primary/35 bg-primary/10 text-primary">
+              <Settings /> Settings
+            </Badge>
+            <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Workspace settings</h2>
+            <p className="mt-2 text-muted-foreground">Manage the data stored by this local GraphRAG workspace.</p>
+          </div>
+          <Button type="button" variant="outline" onClick={onClose}>
+            <X /> Close
+          </Button>
+        </div>
+        <Card className="mb-6 bg-card">
+          <CardHeader>
+            <CardTitle>Knowledge-base records</CardTitle>
+            <CardDescription>
+              Current records in this workspace.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 sm:grid-cols-2">
+            <UsageMetric label="Qdrant parent vectors" value={usage?.qdrant_parent_vectors} loading={loadingUsage} />
+            <UsageMetric label="Qdrant child vectors" value={usage?.qdrant_child_vectors} loading={loadingUsage} />
+            <UsageMetric label="Neo4j entities" value={usage?.neo4j_entities} loading={loadingUsage} />
+            <UsageMetric label="Neo4j relationships" value={usage?.neo4j_relationships} loading={loadingUsage} />
+          </CardContent>
+        </Card>
+        {notice && (
+          <Alert className="mb-6 border-primary/30 bg-primary/10">
+            <Database className="text-primary" />
+            <AlertTitle>Storage updated</AlertTitle>
+            <AlertDescription>{notice}</AlertDescription>
+          </Alert>
+        )}
+        <Card className="mb-6 bg-card">
+          <CardHeader>
+            <CardTitle>Saved chat on this device</CardTitle>
+            <CardDescription>
+              Your conversations and graph view are saved here so they remain after a refresh. Clearing them does not delete your indexed documents or knowledge graph.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {confirmClearBrowser ? (
+              <Alert>
+                <AlertTitle>Clear saved browser history?</AlertTitle>
+                <AlertDescription className="mt-3 flex flex-wrap gap-3">
+                  <Button type="button" variant="outline" onClick={onConfirmClearBrowser}>
+                    Clear browser history
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={onCancelClearBrowser}>Cancel</Button>
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <Button type="button" variant="outline" onClick={onRequestClearBrowser}>
+                Clear saved chats and graph view
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+        <Card className="border-destructive/40 bg-card">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-destructive"><Trash2 className="size-4" /> Danger zone</CardTitle>
+            <CardDescription>
+              Clear all document embeddings in Qdrant and all extracted entities and relationships in Neo4j.
+              This cannot be undone.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {confirmClear ? (
+              <Alert variant="destructive">
+                <AlertTitle>Clear the entire knowledge base?</AlertTitle>
+                <AlertDescription className="mt-3 flex flex-wrap gap-3">
+                  <Button type="button" variant="destructive" disabled={clearing} onClick={onConfirmClear}>
+                    <Trash2 /> {clearing ? "Clearing…" : "Yes, clear all data"}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={clearing} onClick={onCancelClear}>Cancel</Button>
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <Button type="button" variant="destructive" disabled={indexing} onClick={onRequestClear}>
+                <Trash2 /> Clear knowledge base
+              </Button>
+            )}
+            {indexing && <p className="text-sm text-muted-foreground">Cancel or wait for indexing to finish before clearing stored data.</p>}
+          </CardContent>
+        </Card>
+      </section>
+    </div>
+  );
+}
+
+function UsageMetric({ label, value, loading }: { label: string; value?: number; loading: boolean }) {
+  return (
+    <div className="rounded-lg border bg-background/55 p-4">
+      <p className="text-sm leading-5 text-muted-foreground">{label}</p>
+      <p className="mt-1 text-2xl font-semibold tabular-nums">{loading ? "…" : (value ?? "—")}</p>
+    </div>
+  );
+}
+
+function ProviderSwitch({
+  provider,
+  openRouterConfigured,
+  disabled,
+  onChange,
+}: {
+  provider: ModelProvider;
+  openRouterConfigured: boolean;
+  disabled: boolean;
+  onChange: (provider: ModelProvider) => void;
+}) {
+  const usingOpenRouter = provider === "openrouter";
+  return (
+    <div className="flex w-full items-center justify-between gap-2 rounded-md border bg-card/70 px-3 py-2 shadow-sm sm:w-auto sm:justify-start sm:gap-2.5">
+      <span className="pl-2 text-xs font-medium text-muted-foreground">LLM</span>
+      <span className={usingOpenRouter ? "text-xs text-muted-foreground" : "text-xs font-medium text-primary"}>
+        Local
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={usingOpenRouter}
+        aria-label="Use OpenRouter models"
+        disabled={disabled || !openRouterConfigured}
+        onClick={() => onChange(usingOpenRouter ? "local" : "openrouter")}
+        className="relative h-6 w-11 shrink-0 rounded-full border border-border bg-muted outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+        title={openRouterConfigured ? "Switch between local Ollama and OpenRouter models" : "Add OPENROUTER_API_KEY to enable OpenRouter"}
+      >
+        <span
+          className={`absolute inset-y-0.5 left-0.5 size-4 rounded-full bg-foreground shadow-sm transition-transform ${usingOpenRouter ? "translate-x-5 bg-primary" : "translate-x-0"}`}
+        />
+      </button>
+      <span className={usingOpenRouter ? "text-xs font-medium text-primary" : "text-xs text-muted-foreground"}>
+        OpenRouter
+      </span>
+    </div>
   );
 }
 
@@ -366,9 +905,9 @@ function Metric({
   detail: string;
 }) {
   return (
-    <Card size="sm" className="border bg-card/70 py-3">
+    <Card size="sm" className="metric-card border-foreground/15 bg-card/85 py-3 shadow-none">
       <CardContent className="flex items-center gap-3">
-        <span className="grid size-9 place-items-center rounded-lg bg-primary/12 text-primary">
+        <span className="grid size-9 place-items-center rounded-sm bg-primary/12 text-primary">
           {icon}
         </span>
         <div>
@@ -395,7 +934,7 @@ function EvidencePanel({
   sourceCount: number;
 }) {
   return (
-    <Card className="border bg-card/90">
+    <Card className="product-card border-foreground/15 bg-card/95 shadow-none">
       <CardHeader>
         <CardTitle>Evidence trail</CardTitle>
         <CardDescription>
@@ -405,12 +944,12 @@ function EvidencePanel({
       </CardHeader>
       <CardContent className="space-y-3">
         <details
-          className="group rounded-lg border bg-background/45 p-4"
+          className="group rounded-sm border bg-background/45 p-4"
           open={sources.length > 0}
         >
           <summary className="cursor-pointer list-none font-medium">
-            <span className="flex items-center justify-between">
-              <span>Retrieved citations</span>
+            <span className="flex items-center justify-between gap-3">
+              <span className="min-w-0">Retrieved citations</span>
               <Badge variant="secondary">
                 {sources.length} chunks · {sourceCount} sources
               </Badge>
@@ -421,9 +960,9 @@ function EvidencePanel({
               sources.map((source, index) => (
                 <details
                   key={source.child_chunk_id ?? index}
-                  className="rounded-md border bg-card p-3"
+                  className="rounded-sm border bg-card p-3"
                 >
-                  <summary className="cursor-pointer text-sm font-medium text-primary">
+                  <summary className="cursor-pointer break-words text-sm font-medium text-primary">
                     S{index + 1} · {source.source_id}
                   </summary>
                   <p className="mt-2 text-sm leading-6 text-muted-foreground">
@@ -438,7 +977,7 @@ function EvidencePanel({
             )}
           </div>
         </details>
-        <details className="rounded-lg border bg-background/45 p-4">
+        <details className="rounded-sm border bg-background/45 p-4">
           <summary className="cursor-pointer list-none font-medium">
             Parent context{" "}
             <span className="ml-1 text-muted-foreground">
@@ -449,7 +988,7 @@ function EvidencePanel({
             {parents.map((parent) => (
               <div
                 key={parent.parent_chunk_id}
-                className="rounded-md border bg-card p-3"
+                className="rounded-sm border bg-card p-3"
               >
                 <p className="mb-2 text-xs font-medium text-primary">
                   {parent.source_id}

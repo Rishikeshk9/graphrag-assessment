@@ -51,25 +51,42 @@ class GraphRAGWorkflow:
 
     @staticmethod
     async def _verify_provenance(state: EvidenceState) -> dict[str, object]:
+        """Drop only the evidence that cannot be traced, never the whole set.
+
+        A single mismatched citation used to blank every source, parent, and
+        triple, which turned one bad chunk into an unanswerable question.
+        """
         response = state["response"]
         parent_text = {item.parent_chunk_id: item.text.casefold() for item in response.parent_contexts}
-        valid = all(
-            citation.excerpt.casefold() in parent_text.get(citation.parent_chunk_id, "")
-            for citation in response.child_citations
-        )
-        if valid:
-            return {"provenance_verified": True}
 
-        # Do not let a retrieval mismatch become a source-grounded answer. This
-        # should be rare, but an empty evidence set is safer than showing a
-        # citation that cannot be traced to the parent context sent to the LLM.
+        verified_citations = [
+            citation
+            for citation in response.child_citations
+            if citation.excerpt.casefold() in parent_text.get(citation.parent_chunk_id, "")
+        ]
+        kept_parent_ids = {citation.parent_chunk_id for citation in verified_citations}
+        verified_parents = [
+            parent.model_copy(
+                update={
+                    "matching_child_chunk_ids": [
+                        citation.child_chunk_id
+                        for citation in verified_citations
+                        if citation.parent_chunk_id == parent.parent_chunk_id
+                        and citation.child_chunk_id is not None
+                    ]
+                }
+            )
+            for parent in response.parent_contexts
+            if parent.parent_chunk_id in kept_parent_ids
+        ]
+        # Graph facts carry their own verbatim evidence check at extraction time,
+        # so they survive a vector-side mismatch.
         return {
-            "provenance_verified": False,
+            "provenance_verified": len(verified_citations) == len(response.child_citations),
             "response": response.model_copy(
                 update={
-                    "child_citations": [],
-                    "parent_contexts": [],
-                    "graph_triples": [],
+                    "child_citations": verified_citations,
+                    "parent_contexts": verified_parents,
                 }
             ),
         }

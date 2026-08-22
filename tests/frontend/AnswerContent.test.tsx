@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { expect, it } from 'vitest'
-import AnswerContent from './AnswerContent'
+import AnswerContent from '@/AnswerContent'
 
 it('renders model markdown and citations as accessible content', () => {
   render(<AnswerContent answer={'## Summary\n- **Artemis II** is crewed [S1, G1]\n- *Evidence grounded*'} />)

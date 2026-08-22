@@ -16,7 +16,10 @@ async def post_with_retry(client: httpx.AsyncClient, url: str, **kwargs: object)
             return response
         except httpx.HTTPError as error:
             last_error = error
-            if attempt == 2 or (isinstance(error, httpx.HTTPStatusError) and error.response.status_code < 500):
+            client_error = (
+                isinstance(error, httpx.HTTPStatusError) and error.response.status_code < 500
+            )
+            if attempt == 2 or client_error:
                 raise
             await asyncio.sleep(0.4 * (2**attempt))
     raise RuntimeError("unreachable") from last_error
