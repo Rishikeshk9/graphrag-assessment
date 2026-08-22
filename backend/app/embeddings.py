@@ -6,6 +6,8 @@ from typing import Protocol
 
 import httpx
 
+from app.http_retry import post_with_retry
+
 
 class EmbeddingProvider(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
@@ -18,13 +20,12 @@ class OllamaEmbeddingProvider:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
+            response = await post_with_retry(
+                client,
                 f"{self.base_url}/api/embed",
                 json={"model": self.model, "input": texts},
             )
-            response.raise_for_status()
         embeddings = response.json().get("embeddings")
         if not isinstance(embeddings, list) or len(embeddings) != len(texts):
             raise RuntimeError("Ollama returned an invalid embedding response")
         return embeddings
-

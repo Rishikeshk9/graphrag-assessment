@@ -13,6 +13,7 @@ from neo4j import GraphDatabase
 from pydantic import BaseModel, Field
 
 from app.chunking import ChildChunk, normalize_text
+from app.http_retry import post_with_retry
 
 
 class ExtractedEntity(BaseModel):
@@ -118,7 +119,8 @@ class OllamaGraphExtractor:
 
     async def extract(self, child: ChildChunk) -> list[GraphFact]:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
+            response = await post_with_retry(
+                client,
                 f"{self.base_url}/api/chat",
                 json={
                     "model": self.model,
@@ -132,7 +134,6 @@ class OllamaGraphExtractor:
                     ],
                 },
             )
-            response.raise_for_status()
 
         content = response.json().get("message", {}).get("content", "")
         try:
