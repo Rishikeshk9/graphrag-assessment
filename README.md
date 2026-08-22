@@ -1,14 +1,16 @@
 # GraphRAG Assessment
 
-An end-to-end GraphRAG take-home implementation. This repository is intentionally
-independent of previous prototypes and will be built in clearly verifiable stages.
+An end-to-end GraphRAG take-home implementation for querying local documents with
+parent-child retrieval, source-linked graph facts, and streamed grounded answers.
+It is deliberately small enough to run on one machine while keeping each part of
+the retrieval path inspectable.
 
-## Stage 1 — FastAPI foundation
+## What is implemented
 
-The backend currently provides:
+The backend provides:
 
 - a versioned FastAPI application;
-- liveness and readiness health checks;
+- liveness and API-readiness health checks;
 - typed Pydantic API contracts for future ingestion, chat, citations, and graph responses;
 - automatic OpenAPI documentation at `/docs`.
 
@@ -91,6 +93,11 @@ Then open `http://127.0.0.1:5173`. The frontend proxies `/api/*` to the API,
 including unbuffered SSE chat events. On macOS, `host.docker.internal` reaches
 the host Ollama service. The included `extra_hosts` mapping provides the same
 name on modern Linux Docker.
+
+To run the optional Ollama Compose profile instead, point the API at the profile
+service (`OLLAMA_URL=http://ollama:11434`) and pull the required models into that
+container. Host Ollama remains the better default on Apple Silicon because it can
+use Metal acceleration directly.
 
 ## Production workflow additions
 
@@ -190,12 +197,12 @@ cd backend
 pytest
 ```
 
-## Planned API surface
+## API surface
 
 | Endpoint | Stage | Purpose |
 | --- | --- | --- |
 | `GET /api/v1/health/live` | 1 | Process liveness probe |
-| `GET /api/v1/health/ready` | 1 | Dependency readiness probe |
+| `GET /api/v1/health/ready` | 1 | API readiness probe |
 | `POST /api/v1/ingest` | 2–3 | Parent-child ingestion and graph extraction |
 | `POST /api/v1/ingest/file` | 3 | PDF text extraction and GraphRAG ingestion |
 | `POST /api/v1/retrieve` | 4 | Fused vector, parent-context, and graph evidence |

@@ -21,7 +21,7 @@ async def liveness() -> HealthResponse:
 
 @router.get("/ready", response_model=HealthResponse, summary="Readiness probe")
 async def readiness() -> HealthResponse:
-    """Report API readiness; external dependency probes arrive in later stages."""
+    """Report basic API readiness; Compose separately gates store startup."""
     settings = get_settings()
     return HealthResponse(
         status=ServiceStatus.OK,
@@ -29,4 +29,3 @@ async def readiness() -> HealthResponse:
         timestamp=datetime.now(UTC),
         dependencies={"api": ServiceStatus.OK},
     )
-

@@ -40,20 +40,31 @@ class IngestionService:
         documents: list[DocumentInput],
         report_progress: Callable[[str, int, int], Awaitable[None]] | None = None,
     ) -> IngestResponse:
+        chunked_documents = [
+            (
+                document_input,
+                self.chunker.chunk(
+                    document_input.source_id,
+                    document_input.content or "",
+                ),
+            )
+            for document_input in documents
+        ]
+        child_total = sum(len(document.children) for _, document in chunked_documents)
         parent_total = 0
-        child_total = 0
+        processed_children = 0
         relationship_total = 0
         graph_failures = 0
         warnings: list[str] = []
-        for document_input in documents:
-            document = self.chunker.chunk(document_input.source_id, document_input.content or "")
+        if report_progress:
+            await report_progress("chunking", 0, child_total)
+
+        for _, document in chunked_documents:
             if report_progress:
-                await report_progress("chunking", child_total, child_total + len(document.children))
+                await report_progress("embedding", processed_children, child_total)
             parent_vectors = await self.embeddings.embed([parent.text for parent in document.parents])
             child_vectors = await self.embeddings.embed([child.text for child in document.children])
             await self.vector_store.upsert_document(document, parent_vectors, child_vectors)
-            if report_progress:
-                await report_progress("embedding", child_total, child_total + len(document.children))
             if self.graph_extractor is not None and self.graph_store is not None:
                 for child_index, child in enumerate(document.children, start=1):
                     try:
@@ -66,9 +77,13 @@ class IngestionService:
                             f"{type(error).__name__}"
                         )
                     if report_progress:
-                        await report_progress("graph", child_total + child_index, child_total + len(document.children))
+                        await report_progress(
+                            "graph",
+                            processed_children + child_index,
+                            child_total,
+                        )
             parent_total += len(document.parents)
-            child_total += len(document.children)
+            processed_children += len(document.children)
 
         return IngestResponse(
             job_id=str(uuid.uuid4()),

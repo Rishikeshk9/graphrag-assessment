@@ -38,7 +38,13 @@ class IngestionJobs:
 
     async def _run(self, job_id: str, documents: list[DocumentInput]) -> None:
         async def report(phase: str, processed: int, total: int) -> None:
-            await self._update(job_id, status="processing", phase=phase, graph_children_processed=processed, graph_children_total=total)
+            await self._update(
+                job_id,
+                status="processing",
+                phase=phase,
+                graph_children_processed=processed,
+                graph_children_total=total,
+            )
 
         try:
             result = await self.ingestion.ingest(documents, report_progress=report)
@@ -46,4 +52,9 @@ class IngestionJobs:
             completed.update(status="completed", phase="completed")
             await self._update(job_id, **completed)
         except Exception as error:
-            await self._update(job_id, status="failed", phase="failed", warnings=[f"Ingestion failed: {type(error).__name__}"])
+            await self._update(
+                job_id,
+                status="failed",
+                phase="failed",
+                warnings=[f"Ingestion failed: {type(error).__name__}"],
+            )

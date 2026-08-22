@@ -15,8 +15,8 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         version="0.1.0",
         description=(
-            "GraphRAG assessment API. Stage 1 establishes typed, versioned API "
-            "contracts and health probes."
+            "GraphRAG API with parent-child retrieval, provenance-aware graph "
+            "facts, asynchronous ingestion, and SSE-grounded chat."
         ),
     )
     app.add_middleware(

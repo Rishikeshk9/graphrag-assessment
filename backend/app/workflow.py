@@ -50,11 +50,26 @@ class GraphRAGWorkflow:
         return {"response": await self.retrieval.retrieve(state["planned_request"])}
 
     @staticmethod
-    async def _verify_provenance(state: EvidenceState) -> dict[str, bool]:
+    async def _verify_provenance(state: EvidenceState) -> dict[str, object]:
         response = state["response"]
         parent_text = {item.parent_chunk_id: item.text.casefold() for item in response.parent_contexts}
         valid = all(
             citation.excerpt.casefold() in parent_text.get(citation.parent_chunk_id, "")
             for citation in response.child_citations
         )
-        return {"provenance_verified": valid}
+        if valid:
+            return {"provenance_verified": True}
+
+        # Do not let a retrieval mismatch become a source-grounded answer. This
+        # should be rare, but an empty evidence set is safer than showing a
+        # citation that cannot be traced to the parent context sent to the LLM.
+        return {
+            "provenance_verified": False,
+            "response": response.model_copy(
+                update={
+                    "child_citations": [],
+                    "parent_contexts": [],
+                    "graph_triples": [],
+                }
+            ),
+        }

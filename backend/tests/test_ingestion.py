@@ -68,3 +68,32 @@ def test_ingestion_indexes_vectors_when_graph_extraction_fails() -> None:
     assert response.child_chunks_indexed == 2
     assert response.graph_extraction_failures == 2
     assert response.graph_relationships_indexed == 0
+
+
+def test_ingestion_reports_one_total_for_multiple_documents() -> None:
+    service = IngestionService(
+        chunker=HierarchicalChunker(parent_size=8, parent_overlap=2, child_size=3, child_overlap=1),
+        embeddings=FakeEmbeddings(),
+        vector_store=FakeVectorStore(),
+        graph_extractor=FailingGraphExtractor(),
+        graph_store=FakeGraphStore(),
+    )
+    updates: list[tuple[str, int, int]] = []
+
+    async def report(phase: str, processed: int, total: int) -> None:
+        updates.append((phase, processed, total))
+
+    response = asyncio.run(
+        service.ingest(
+            [
+                DocumentInput(source_id="first", content="one two three four"),
+                DocumentInput(source_id="second", content="five six seven eight"),
+            ],
+            report_progress=report,
+        )
+    )
+
+    assert response.child_chunks_indexed == 4
+    assert updates[0] == ("chunking", 0, 4)
+    assert {total for _, _, total in updates} == {4}
+    assert updates[-1] == ("graph", 4, 4)
