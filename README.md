@@ -5,9 +5,10 @@ parent-child hierarchical chunking, typed entity relationships are extracted int
 Neo4j with chunk-level provenance, and a FastAPI backend streams grounded,
 citation-bearing answers to a React chat UI with a live graph inspector.
 
-Everything runs on one machine. Qdrant and Neo4j run in containers; embeddings
-run in Ollama on the host. A top-level UI switch selects either local Ollama
-models or OpenRouter for answer generation and graph extraction.
+The default local deployment runs Qdrant and Neo4j in containers and Ollama on
+the host. A top-level UI switch selects either local Ollama models or OpenRouter
+for embeddings, graph extraction, and answer generation. Qdrant and Neo4j can
+also be configured to use hosted services through environment variables.
 
 ## Architecture
 
@@ -16,11 +17,11 @@ flowchart LR
   UI[React + Tailwind + Cytoscape] -->|SSE POST /chat| API[FastAPI]
   UI -->|PDF upload + job polling| API
   API -->|graph evidence in SSE| UI
-  API -->|child vector search| Q[(Qdrant: children)]
-  API -->|parent context expansion| QP[(Qdrant: parents)]
+  API -->|child vector search| Q[(Qdrant: provider-specific children)]
+  API -->|parent context expansion| QP[(Qdrant: provider-specific parents)]
   API -->|N-hop traversal with provenance| N[(Neo4j)]
-  API -->|structured graph extraction| G[OpenRouter: Ox Alpha]
-  API -->|answer token stream| O[Host Ollama: Qwen2.5]
+  API -->|local or hosted graph extraction| G[Ollama Qwen3 / OpenRouter Ox Alpha]
+  API -->|local or hosted answer stream| O[Ollama Qwen2.5 / OpenRouter Ox Alpha]
 ```
 
 Ingestion path: `chunk → embed → upsert child + parent vectors → extract typed
@@ -46,11 +47,11 @@ answer with [S<n>] and [G<n>] citations`.
 ```bash
 # 1. Pull the local models (host Ollama must already be running).
 ollama pull qwen3-embedding
+ollama pull qwen3:4b
 ollama pull qwen2.5:7b-instruct
 
-# 2. Configure a graph-extraction key (this is the only hosted call).
+# 2. Optional: enable the OpenRouter mode in the UI.
 export OPENROUTER_API_KEY='your-key-here'
-export GRAPH_EXTRACTION_PROVIDER=openrouter
 
 # 3. Start Qdrant, Neo4j, the API, and the UI.
 docker compose up --build
@@ -91,9 +92,15 @@ change the defaults.
 | --- | --- |
 | `GET /api/v1/health/live` | Process liveness probe |
 | `GET /api/v1/health/ready` | API readiness probe |
+| `GET /api/v1/health/model-providers` | Available LLM-provider capabilities; never returns secrets |
 | `POST /api/v1/ingest` | Async ingestion of inline documents; returns a `job_id` |
 | `POST /api/v1/ingest/file` | Async ingestion of a text-selectable PDF |
 | `GET /api/v1/ingest/{job_id}` | Job status: `queued`, `chunking`, `embedding`, `graph`, `completed`, `failed` |
+| `POST /api/v1/ingest/{job_id}/cancel` | Cancel a queued or running ingestion job |
+| `GET /api/v1/knowledge-base/documents` | List indexed documents and their vector counts |
+| `GET /api/v1/knowledge-base/usage` | Count vector and graph records |
+| `DELETE /api/v1/documents/{source_id}` | Remove one document's vectors and graph support |
+| `DELETE /api/v1/knowledge-base` | Clear all application vectors and graph facts |
 | `POST /api/v1/retrieve` | Fused child citations, parent contexts, and graph triples |
 | `GET /api/v1/graph/subgraph` | Node/edge JSON for the graph visualizer |
 | `POST /api/v1/chat` | SSE stream: `sources`, `parents`, `graph`, `token`, `error`, `done` |
@@ -149,12 +156,11 @@ collection and are what the LLM actually reads.
 
 ### Graph modeling
 
-Relationships are extracted per child chunk with OpenRouter structured output
-against a Pydantic JSON schema at temperature 0 (`stealth/ox-alpha` by
-default). Ox Alpha uses JSON-object mode because its providers do not currently
-route strict JSON Schema requests; the backend validates the object locally
-before evidence grounding. Set `GRAPH_EXTRACTION_PROVIDER=ollama` to return to
-the local Qwen3 extractor. Every relationship must quote
+Relationships are extracted per child chunk with the currently selected provider:
+local Ollama uses `qwen3:4b`; OpenRouter uses `stealth/ox-alpha` with structured
+JSON output at temperature 0. Ox Alpha uses JSON-object mode because its
+providers do not currently route strict JSON Schema requests; the backend
+validates the object locally before evidence grounding. Every relationship must quote
 evidence that appears verbatim in the chunk, or it is discarded before it ever
 reaches Neo4j. Entities become `:Entity` nodes with an additional PascalCase
 label for their type (`:Entity:Company`), uniquely keyed on
@@ -180,12 +186,15 @@ used to expand a bare follow-up ("what did it pay?") into a retrievable query.
 ### Local / OpenRouter mode
 
 The top-right **LLM** switch is sent with every chat and ingestion request. In
-**Local** mode, Ollama generates answers and extracts graph facts. In
-**OpenRouter** mode, the configured OpenRouter models do both jobs. Retrieval
-embeddings intentionally remain local in both modes: Qdrant stores vectors in a
-single embedding space, and switching embedding models mid-index would make
-existing documents incomparable. The UI disables OpenRouter unless
-`OPENROUTER_API_KEY` is configured.
+**Local** mode, Ollama creates embeddings (`qwen3-embedding`), extracts graph
+facts (`qwen3:4b`), and generates answers (`qwen2.5:7b-instruct`). In
+**OpenRouter** mode, OpenRouter creates embeddings
+(`nvidia/nemotron-3-embed-1b:free`) and uses the configured chat/graph model
+(`stealth/ox-alpha` by default) for generation and graph extraction. Because
+the two embedding models can use different vector dimensions, their documents
+are stored in separate Qdrant collections and are retrieved only with the
+matching provider. Neo4j stores the shared symbolic graph with document-level
+provenance. The UI disables OpenRouter unless `OPENROUTER_API_KEY` is configured.
 
 ### Evaluation
 
@@ -229,8 +238,10 @@ curl -X POST http://127.0.0.1:8090/api/v1/evaluate \
 - **Ingestion jobs are in-memory.** That keeps the single-node deployment simple
   and the API responsive; a durable queue is required before running multiple API
   workers.
-- **Local inference keeps documents private** at the cost of host latency. The
-  container Ollama profile exists for Linux GPU hosts.
+- **Local inference keeps documents private** at the cost of host latency. In
+  OpenRouter mode, the chunk text sent for embedding, graph extraction, and
+  answer generation leaves the local machine. The container Ollama profile
+  exists for Linux GPU hosts.
 
 ## Verify
 
