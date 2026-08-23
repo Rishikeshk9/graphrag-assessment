@@ -143,6 +143,13 @@ export default function App() {
     () => new Set((lastAnswer?.sources ?? []).map((source) => source.source_id)).size,
     [lastAnswer],
   );
+  const indexingProgress = useMemo(() => {
+    const match = uploadStatus.match(/(\d+)\/(\d+) chunks/);
+    if (!match) return null;
+    const completed = Number(match[1]);
+    const total = Number(match[2]);
+    return total > 0 ? { completed, total, percent: Math.round((completed / total) * 100) } : null;
+  }, [uploadStatus]);
   const loading = status.includes("Retrieving") || status.includes("Generating");
 
   useEffect(() => {
@@ -434,17 +441,43 @@ export default function App() {
         </header>
 
         {uploadStatus && (
-          <Alert className="mb-6 border-primary/25 bg-primary/8">
-            <Database className="text-primary" />
-            <AlertTitle>Knowledge-base update</AlertTitle>
-            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
-              <span className="min-w-0 break-words">{uploadStatus}</span>
+          <Alert className="mb-6 overflow-hidden border-primary/35 bg-[linear-gradient(110deg,hsl(var(--primary)/0.18),hsl(var(--card))_48%,hsl(var(--primary)/0.10))] p-0 shadow-[0_14px_45px_-28px_hsl(var(--primary)/0.9)]">
+            <div className="col-span-2 flex items-start gap-3 px-4 py-4 sm:px-5">
+              <div className="relative mt-0.5 grid size-10 shrink-0 place-items-center rounded-md border border-primary/40 bg-primary/15 text-primary shadow-[0_0_24px_hsl(var(--primary)/0.28)]">
+                <Database className="size-5" />
+                {isIndexing && <span className="absolute -right-1 -top-1 size-2.5 animate-ping rounded-full bg-primary" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <AlertTitle className="text-base font-semibold tracking-tight">{isIndexing ? "Indexing your document" : "Knowledge base updated"}</AlertTitle>
+                  <Badge className={isIndexing ? "border-primary/30 bg-primary/15 text-primary" : "border-primary/25 bg-primary/10 text-primary"} variant="outline">
+                    {isIndexing ? "In progress" : "Complete"}
+                  </Badge>
+                </div>
+                <AlertDescription className="mt-1.5 max-w-3xl break-words text-sm leading-6 text-muted-foreground">
+                  {uploadStatus}
+                </AlertDescription>
+                {isIndexing && (
+                  <div className="mt-3">
+                    <div className="mb-1.5 flex items-center justify-between text-[11px] font-medium uppercase tracking-[0.13em] text-muted-foreground">
+                      <span>{indexingProgress ? "Graph extraction" : "Preparing document"}</span>
+                      <span>{indexingProgress ? `${indexingProgress.completed} of ${indexingProgress.total}` : "Working"}</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-foreground/10">
+                      <div
+                        className={`h-full rounded-full bg-primary shadow-[0_0_12px_hsl(var(--primary)/0.8)] transition-[width] duration-500 ${indexingProgress ? "" : "w-2/5 animate-pulse"}`}
+                        style={indexingProgress ? { width: `${Math.max(4, indexingProgress.percent)}%` } : undefined}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
               {isIndexing && (
-                <Button type="button" variant="outline" size="sm" onClick={cancelIndexing}>
-                  <X /> Cancel indexing
+                <Button type="button" variant="outline" size="sm" className="mt-0.5 border-foreground/20 bg-background/35 hover:border-destructive/60 hover:bg-destructive/10 hover:text-destructive" onClick={cancelIndexing}>
+                  <X /> Cancel
                 </Button>
               )}
-            </AlertDescription>
+            </div>
           </Alert>
         )}
         {error && (
