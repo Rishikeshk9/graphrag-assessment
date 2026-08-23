@@ -10,6 +10,10 @@ the host. A top-level UI switch selects either local Ollama models or OpenRouter
 for embeddings, graph extraction, and answer generation. Qdrant and Neo4j can
 also be configured to use hosted services through environment variables.
 
+## Video demonstration
+
+Watch the platform walkthrough on [YouTube](https://youtu.be/gSqgwvoNEIs?si=2KdP_1aeL2B5hiqk).
+
 ## Architecture
 
 ```mermaid

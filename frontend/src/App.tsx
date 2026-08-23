@@ -240,17 +240,20 @@ export default function App() {
       });
   }, []);
 
-  useEffect(() => {
-    if (!settingsOpen) return;
+  async function openSettings() {
+    setSettingsOpen(true);
+    setSidebarOpen(false);
     setLoadingKnowledgeBaseUsage(true);
-    void Promise.all([fetchKnowledgeBaseUsage(), fetchKnowledgeBaseDocuments()])
-      .then(([usage, documents]) => {
-        setKnowledgeBaseUsage(usage);
-        setKnowledgeBaseDocuments(documents);
-      })
-      .catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load knowledge-base usage"))
-      .finally(() => setLoadingKnowledgeBaseUsage(false));
-  }, [settingsOpen]);
+    try {
+      const [usage, documents] = await Promise.all([fetchKnowledgeBaseUsage(), fetchKnowledgeBaseDocuments()]);
+      setKnowledgeBaseUsage(usage);
+      setKnowledgeBaseDocuments(documents);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not load knowledge-base usage");
+    } finally {
+      setLoadingKnowledgeBaseUsage(false);
+    }
+  }
 
   function updateConversation(
     conversationId: string,
@@ -798,10 +801,7 @@ export default function App() {
             };
           });
         }}
-        onOpenSettings={() => {
-          setSettingsOpen(true);
-          setSidebarOpen(false);
-        }}
+        onOpenSettings={() => void openSettings()}
       />
       {settingsOpen && (
         <SettingsPage
