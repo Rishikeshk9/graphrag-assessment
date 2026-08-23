@@ -14,6 +14,10 @@ also be configured to use hosted services through environment variables.
 
 Watch the platform walkthrough on [YouTube](https://youtu.be/gSqgwvoNEIs?si=2KdP_1aeL2B5hiqk).
 
+## Live test deployment
+
+Try the deployed chat application at [ragchat.rushikeshkardile.com](https://ragchat.rushikeshkardile.com/).
+
 ## Architecture
 
 ```mermaid
