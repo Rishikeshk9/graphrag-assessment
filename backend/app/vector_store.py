@@ -72,9 +72,10 @@ class QdrantVectorStore:
         url: str,
         children_collection: str,
         parents_collection: str,
+        api_key: str = "",
         client: QdrantClient | None = None,
     ) -> None:
-        self.client = client or QdrantClient(url=url)
+        self.client = client or QdrantClient(url=url, api_key=api_key or None)
         self.children_collection = children_collection
         self.parents_collection = parents_collection
 

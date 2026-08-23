@@ -25,4 +25,5 @@ def vector_store_for(settings: Settings, provider: LLMProvider) -> QdrantVectorS
         settings.qdrant_url,
         f"{settings.qdrant_children_collection}{suffix}",
         f"{settings.qdrant_parents_collection}{suffix}",
+        api_key=settings.qdrant_api_key,
     )

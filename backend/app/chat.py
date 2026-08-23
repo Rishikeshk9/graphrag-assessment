@@ -174,14 +174,22 @@ class ChatService:
 
     async def stream_events(self, request: ChatRequest) -> AsyncIterator[str]:
         retrieval_query = condense_query(request.query, request.history)
-        retrieval = await self.retrieval.retrieve(
-            RetrievalRequest(
-                query=retrieval_query,
-                child_limit=request.child_limit,
-                graph_hops=request.graph_hops,
-                graph_limit=request.graph_limit,
+        try:
+            retrieval = await self.retrieval.retrieve(
+                RetrievalRequest(
+                    query=retrieval_query,
+                    child_limit=request.child_limit,
+                    graph_hops=request.graph_hops,
+                    graph_limit=request.graph_limit,
+                )
             )
-        )
+        except Exception as error:
+            # StreamingResponse sends HTTP headers before it consumes this generator.
+            # Convert retrieval failures into an SSE event instead of abruptly closing
+            # the response, which browsers otherwise report as a protocol error.
+            yield sse("error", f"Retrieval failed: {type(error).__name__}")
+            yield sse("done", {})
+            return
         yield sse("sources", [item.model_dump() for item in retrieval.child_citations])
         yield sse("parents", [item.model_dump() for item in retrieval.parent_contexts])
         yield sse("graph", [item.model_dump() for item in retrieval.graph_triples])

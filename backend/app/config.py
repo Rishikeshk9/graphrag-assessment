@@ -16,6 +16,8 @@ class Settings(BaseSettings):
         validation_alias="CORS_ORIGINS",
     )
     qdrant_url: str = "http://localhost:6333"
+    # Empty for the local Docker service; required by Qdrant Cloud.
+    qdrant_api_key: str = ""
     qdrant_children_collection: str = "graphrag_children"
     qdrant_parents_collection: str = "graphrag_parents"
     ollama_url: str = "http://localhost:11434"

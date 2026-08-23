@@ -1,7 +1,9 @@
 import asyncio
+from unittest.mock import Mock
 
 from qdrant_client import QdrantClient
 
+from app import vector_store
 from app.chunking import HierarchicalChunker
 from app.vector_store import QdrantVectorStore
 
@@ -12,6 +14,22 @@ def build_store(client: QdrantClient) -> QdrantVectorStore:
         children_collection="children_test",
         parents_collection="parents_test",
         client=client,
+    )
+
+
+def test_qdrant_cloud_api_key_is_passed_to_client(monkeypatch) -> None:
+    client_factory = Mock()
+    monkeypatch.setattr(vector_store, "QdrantClient", client_factory)
+
+    QdrantVectorStore(
+        url="https://cluster.cloud.qdrant.io",
+        children_collection="children_test",
+        parents_collection="parents_test",
+        api_key="cloud-key",
+    )
+
+    client_factory.assert_called_once_with(
+        url="https://cluster.cloud.qdrant.io", api_key="cloud-key"
     )
 
 
