@@ -63,3 +63,12 @@ export type ChatMessage = ChatTurn & {
   triples?: GraphTriple[]
   status?: 'streaming' | 'complete' | 'failed'
 }
+
+export type Conversation = {
+  id: string
+  title: string
+  messages: ChatMessage[]
+  subgraph: Subgraph
+  createdAt: string
+  updatedAt: string
+}

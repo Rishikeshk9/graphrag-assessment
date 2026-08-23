@@ -4,7 +4,9 @@ import {
   Database,
   FileText,
   Menu,
+  MessageSquare,
   Network,
+  Plus,
   RotateCcw,
   Send,
   Settings,
@@ -43,6 +45,7 @@ import type {
   ChatMessage,
   ChatTurn,
   Citation,
+  Conversation,
   GraphTriple,
   ParentContext,
   Subgraph,
@@ -57,6 +60,8 @@ const EMPTY_KNOWLEDGE_BASE_USAGE: KnowledgeBaseUsage = {
 };
 const CHAT_STORAGE_KEY = "graphrag-assessment.chat.v1";
 const SUBGRAPH_STORAGE_KEY = "graphrag-assessment.subgraph.v1";
+const CONVERSATIONS_STORAGE_KEY = "graphrag-assessment.conversations.v1";
+const ACTIVE_CONVERSATION_STORAGE_KEY = "graphrag-assessment.active-conversation.v1";
 
 function readStoredChat(): ChatMessage[] {
   try {
@@ -84,10 +89,51 @@ function readStoredSubgraph(): Subgraph {
   return EMPTY_SUBGRAPH;
 }
 
+function createConversation(title = "New conversation"): Conversation {
+  const now = new Date().toISOString();
+  return { id: newId(), title, messages: [], subgraph: EMPTY_SUBGRAPH, createdAt: now, updatedAt: now };
+}
+
+function readStoredWorkspace(): { conversations: Conversation[]; activeConversationId: string } {
+  try {
+    const value = globalThis.localStorage?.getItem(CONVERSATIONS_STORAGE_KEY);
+    const parsed: unknown = value ? JSON.parse(value) : null;
+    if (Array.isArray(parsed)) {
+      const conversations = parsed.filter((item): item is Conversation =>
+        typeof item === "object" && item !== null && "id" in item && "title" in item
+        && "messages" in item && Array.isArray(item.messages) && "subgraph" in item,
+      );
+      if (conversations.length > 0) {
+        const storedActive = globalThis.localStorage?.getItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+        return {
+          conversations,
+          activeConversationId: conversations.some((conversation) => conversation.id === storedActive)
+            ? storedActive!
+            : conversations[0].id,
+        };
+      }
+    }
+  } catch {
+    // Invalid storage should never prevent the app loading.
+  }
+
+  // Migrate the previous one-conversation format without losing existing work.
+  const legacyMessages = readStoredChat();
+  const legacySubgraph = readStoredSubgraph();
+  const migrated = createConversation(
+    legacyMessages.find((message) => message.role === "user")?.content.slice(0, 52) || "New conversation",
+  );
+  migrated.messages = legacyMessages;
+  migrated.subgraph = legacySubgraph;
+  return { conversations: [migrated], activeConversationId: migrated.id };
+}
+
 function clearStoredSession() {
   try {
     globalThis.localStorage?.removeItem(CHAT_STORAGE_KEY);
     globalThis.localStorage?.removeItem(SUBGRAPH_STORAGE_KEY);
+    globalThis.localStorage?.removeItem(CONVERSATIONS_STORAGE_KEY);
+    globalThis.localStorage?.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
   } catch {
     // Browser privacy settings can disable storage; the in-memory reset still works.
   }
@@ -109,8 +155,7 @@ function messageTime(timestamp?: string) {
 
 export default function App() {
   const [question, setQuestion] = useState("What relationships are described in my documents?");
-  const [messages, setMessages] = useState<ChatMessage[]>(readStoredChat);
-  const [subgraph, setSubgraph] = useState<Subgraph>(readStoredSubgraph);
+  const [workspace, setWorkspace] = useState(readStoredWorkspace);
   const [status, setStatus] = useState("Ready");
   const [error, setError] = useState("");
   const [uploadStatus, setUploadStatus] = useState("");
@@ -131,6 +176,12 @@ export default function App() {
     jobId?: string;
   } | null>(null);
   const threadEnd = useRef<HTMLDivElement>(null);
+
+  const activeConversation = workspace.conversations.find(
+    (conversation) => conversation.id === workspace.activeConversationId,
+  ) ?? workspace.conversations[0];
+  const messages = activeConversation.messages;
+  const subgraph = activeConversation.subgraph;
 
   const lastAnswer = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant"),
@@ -160,25 +211,16 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const completedMessages = messages.filter((message) => message.status !== "streaming");
-      if (completedMessages.length === 0) globalThis.localStorage?.removeItem(CHAT_STORAGE_KEY);
-      else globalThis.localStorage?.setItem(CHAT_STORAGE_KEY, JSON.stringify(completedMessages));
-    } catch {
-      // Chat still works when the browser has no writable localStorage.
-    }
-  }, [messages]);
-
-  useEffect(() => {
-    try {
-      if (subgraph.nodes.length === 0 && subgraph.edges.length === 0) {
-        globalThis.localStorage?.removeItem(SUBGRAPH_STORAGE_KEY);
-      } else {
-        globalThis.localStorage?.setItem(SUBGRAPH_STORAGE_KEY, JSON.stringify(subgraph));
-      }
+      const saved = workspace.conversations.map((conversation) => ({
+        ...conversation,
+        messages: conversation.messages.filter((message) => message.status !== "streaming"),
+      }));
+      globalThis.localStorage?.setItem(CONVERSATIONS_STORAGE_KEY, JSON.stringify(saved));
+      globalThis.localStorage?.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, workspace.activeConversationId);
     } catch {
       // Graph inspection remains usable in-memory if persistence is unavailable.
     }
-  }, [subgraph]);
+  }, [workspace]);
 
   useEffect(() => {
     void fetchModelProviders()
@@ -201,26 +243,43 @@ export default function App() {
       .finally(() => setLoadingKnowledgeBaseUsage(false));
   }, [settingsOpen]);
 
-  function updateAnswer(id: string, change: Partial<ChatMessage>) {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === id ? { ...message, ...change } : message,
+  function updateConversation(
+    conversationId: string,
+    change: Partial<Pick<Conversation, "messages" | "subgraph" | "title">>
+      | ((conversation: Conversation) => Partial<Pick<Conversation, "messages" | "subgraph" | "title">>),
+  ) {
+    setWorkspace((current) => ({
+      ...current,
+      conversations: current.conversations.map((conversation) =>
+        conversation.id === conversationId
+          ? {
+              ...conversation,
+              ...(typeof change === "function" ? change(conversation) : change),
+              updatedAt: new Date().toISOString(),
+            }
+          : conversation,
       ),
-    );
+    }));
   }
 
-  function appendToken(id: string, token: string) {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === id
-          ? { ...message, content: message.content + token }
-          : message,
+  function updateAnswer(conversationId: string, id: string, change: Partial<ChatMessage>) {
+    updateConversation(conversationId, (conversation) => ({
+      messages: conversation.messages.map((message) => message.id === id ? { ...message, ...change } : message),
+    }));
+  }
+
+  function appendToken(conversationId: string, id: string, token: string) {
+    updateConversation(conversationId, (conversation) => ({
+      messages: conversation.messages.map((message) =>
+        message.id === id ? { ...message, content: message.content + token } : message,
       ),
-    );
+    }));
   }
 
   async function sendQuestion(query: string, priorMessages: ChatMessage[] = messages) {
     if (!query || loading) return;
+
+    const conversationId = workspace.activeConversationId;
 
     streamRef.current?.abort();
     const controller = new AbortController();
@@ -232,11 +291,14 @@ export default function App() {
       .map(({ role, content }) => ({ role, content }));
     const answerId = newId();
     const sentAt = new Date().toISOString();
-    setMessages([
-      ...priorMessages,
-      { id: newId(), role: "user", content: query, timestamp: sentAt },
-      { id: answerId, role: "assistant", content: "", status: "streaming" },
-    ]);
+    updateConversation(conversationId, {
+      title: priorMessages.some((message) => message.role === "user") ? activeConversation.title : query.slice(0, 52),
+      messages: [
+        ...priorMessages,
+        { id: newId(), role: "user", content: query, timestamp: sentAt },
+        { id: answerId, role: "assistant", content: "", status: "streaming" },
+      ],
+    });
     setError("");
     setStatus("Retrieving vector and graph evidence…");
 
@@ -246,34 +308,34 @@ export default function App() {
       await streamChat(
         { query, history, llmProvider },
         {
-          onSources: (value: Citation[]) => updateAnswer(answerId, { sources: value }),
+          onSources: (value: Citation[]) => updateAnswer(conversationId, answerId, { sources: value }),
           onParents: (value: ParentContext[]) =>
-            updateAnswer(answerId, { parents: value }),
+            updateAnswer(conversationId, answerId, { parents: value }),
           onGraph: (value: GraphTriple[]) => {
             streamed = value;
-            updateAnswer(answerId, { triples: value });
+            updateAnswer(conversationId, answerId, { triples: value });
             setStatus("Generating cited answer…");
           },
-          onToken: (token: string) => appendToken(answerId, token),
+          onToken: (token: string) => appendToken(conversationId, answerId, token),
           onError: (message: string) => {
             responseFailed = true;
             setError(message);
-            updateAnswer(answerId, { status: "failed", timestamp: new Date().toISOString() });
+            updateAnswer(conversationId, answerId, { status: "failed", timestamp: new Date().toISOString() });
           },
           onDone: () => setStatus(responseFailed ? "Failed" : "Complete"),
         },
         { signal: controller.signal },
       );
       if (!responseFailed) {
-        updateAnswer(answerId, { status: "complete", timestamp: new Date().toISOString() });
+        updateAnswer(conversationId, answerId, { status: "complete", timestamp: new Date().toISOString() });
       }
       // The inspector must show the same graph evidence that was supplied to
       // the model, not a second broad traversal that can contain extra edges.
-      setSubgraph(subgraphFromTriples(streamed));
+      updateConversation(conversationId, { subgraph: subgraphFromTriples(streamed) });
     } catch (caught) {
       if (controller.signal.aborted) return;
       setError(caught instanceof Error ? caught.message : "Chat request failed");
-      updateAnswer(answerId, { status: "failed", timestamp: new Date().toISOString() });
+      updateAnswer(conversationId, answerId, { status: "failed", timestamp: new Date().toISOString() });
       setStatus("Failed");
     }
   }
@@ -364,8 +426,8 @@ export default function App() {
     try {
       const result = await clearKnowledgeBase();
       clearStoredSession();
-      setMessages([]);
-      setSubgraph(EMPTY_SUBGRAPH);
+      const fresh = createConversation();
+      setWorkspace({ conversations: [fresh], activeConversationId: fresh.id });
       setKnowledgeBaseUsage(EMPTY_KNOWLEDGE_BASE_USAGE);
       const notice = `Knowledge base and saved browser evidence cleared: ${result.vectors_removed} vectors, ${result.relationships_removed} relationships, and ${result.entities_removed} entities removed.`;
       setUploadStatus(notice);
@@ -380,8 +442,8 @@ export default function App() {
 
   function clearBrowserSession() {
     clearStoredSession();
-    setMessages([]);
-    setSubgraph(EMPTY_SUBGRAPH);
+    const fresh = createConversation();
+    setWorkspace({ conversations: [fresh], activeConversationId: fresh.id });
     setConfirmClearBrowser(false);
     setSettingsNotice("Saved chat history and graph evidence were cleared from this browser. Qdrant and Neo4j were not changed.");
   }
@@ -514,7 +576,7 @@ export default function App() {
               <CardHeader className="border-b border-foreground/12">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <CardTitle>Conversation</CardTitle>
+                  <CardTitle>Conversation</CardTitle>
                     <CardDescription>
                       Follow-up questions reuse the earlier turns for context.
                     </CardDescription>
@@ -685,6 +747,35 @@ export default function App() {
       <NavigationSidebar
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        conversations={workspace.conversations}
+        activeConversationId={workspace.activeConversationId}
+        disabled={loading}
+        onCreateConversation={() => {
+          const next = createConversation();
+          setWorkspace((current) => ({ ...current, conversations: [next, ...current.conversations], activeConversationId: next.id }));
+          setQuestion("");
+          setStatus("Ready");
+          setError("");
+          setSidebarOpen(false);
+        }}
+        onSelectConversation={(conversationId) => {
+          setWorkspace((current) => ({ ...current, activeConversationId: conversationId }));
+          setStatus("Ready");
+          setError("");
+          setSidebarOpen(false);
+        }}
+        onDeleteConversation={(conversationId) => {
+          setWorkspace((current) => {
+            const remaining = current.conversations.filter((conversation) => conversation.id !== conversationId);
+            const conversations = remaining.length > 0 ? remaining : [createConversation()];
+            return {
+              conversations,
+              activeConversationId: current.activeConversationId === conversationId
+                ? conversations[0].id
+                : current.activeConversationId,
+            };
+          });
+        }}
         onOpenSettings={() => {
           setSettingsOpen(true);
           setSidebarOpen(false);
@@ -719,10 +810,22 @@ export default function App() {
 function NavigationSidebar({
   open,
   onClose,
+  conversations,
+  activeConversationId,
+  disabled,
+  onCreateConversation,
+  onSelectConversation,
+  onDeleteConversation,
   onOpenSettings,
 }: {
   open: boolean;
   onClose: () => void;
+  conversations: Conversation[];
+  activeConversationId: string;
+  disabled: boolean;
+  onCreateConversation: () => void;
+  onSelectConversation: (conversationId: string) => void;
+  onDeleteConversation: (conversationId: string) => void;
   onOpenSettings: () => void;
 }) {
   if (!open) return null;
@@ -741,6 +844,43 @@ function NavigationSidebar({
           <Button type="button" variant="ghost" size="icon" aria-label="Close navigation" onClick={onClose}>
             <X />
           </Button>
+        </div>
+        <Separator className="my-5" />
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-medium tracking-[0.12em] text-muted-foreground uppercase">Conversations</p>
+          <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={onCreateConversation}>
+            <Plus /> New
+          </Button>
+        </div>
+        <div className="mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
+          {conversations.map((conversation) => (
+            <div
+              key={conversation.id}
+              className={`group flex items-center gap-1 rounded-md border p-1 transition-colors ${conversation.id === activeConversationId ? "border-primary/35 bg-primary/10" : "border-transparent hover:border-foreground/12 hover:bg-muted/60"}`}
+            >
+              <Button
+                type="button"
+                variant="ghost"
+                className={`min-w-0 flex-1 justify-start gap-2 px-2 text-left ${conversation.id === activeConversationId ? "text-primary" : ""}`}
+                disabled={disabled}
+                onClick={() => onSelectConversation(conversation.id)}
+              >
+                <MessageSquare className="size-4 shrink-0" />
+                <span className="truncate">{conversation.title}</span>
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8 shrink-0 text-muted-foreground opacity-100 hover:text-destructive sm:opacity-0 sm:group-hover:opacity-100"
+                disabled={disabled}
+                aria-label={`Delete ${conversation.title}`}
+                onClick={() => onDeleteConversation(conversation.id)}
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          ))}
         </div>
         <Separator className="my-5" />
         <Button type="button" variant="secondary" className="justify-start" onClick={onOpenSettings}>

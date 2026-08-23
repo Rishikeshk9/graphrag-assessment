@@ -156,3 +156,22 @@ it("persists a completed chat and can clear browser storage without touching the
   await waitFor(() => expect(screen.getByText(/saved chat history and graph evidence were cleared/i)).toBeInTheDocument());
   expect(localStorage.getItem("graphrag-assessment.chat.v1")).toBeNull();
 });
+
+it("keeps separate conversations with their own chat history", async () => {
+  render(<App />);
+  await ask("Who acquired Activision Blizzard?");
+  await waitFor(() => expect(screen.getByText(/Microsoft did/)).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+  fireEvent.click(screen.getByRole("button", { name: "New" }));
+  expect(screen.queryByText(/Microsoft did/)).not.toBeInTheDocument();
+
+  await ask("What did Microsoft pay?");
+  await waitFor(() => expect(screen.getByText(/It paid/)).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+  fireEvent.click(screen.getByRole("button", { name: "Who acquired Activision Blizzard?" }));
+  expect(screen.getByText(/Microsoft did/)).toBeInTheDocument();
+  expect(screen.queryByText(/It paid/)).not.toBeInTheDocument();
+  expect(JSON.parse(localStorage.getItem("graphrag-assessment.conversations.v1") ?? "[]")).toHaveLength(2);
+});
