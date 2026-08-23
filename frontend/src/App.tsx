@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  ChevronDown,
   Database,
   FileText,
   Menu,
@@ -714,24 +715,15 @@ export default function App() {
               </CardContent>
             </Card>
 
-            <EvidencePanel
-              sources={sources}
-              parents={parents}
-              sourceCount={sourceCount}
-            />
           </div>
 
-          <aside className="min-w-0 self-start">
-            <Card className="product-card border-foreground/15 bg-card/95 shadow-none xl:sticky xl:top-6">
-              <CardHeader className="border-b border-foreground/12">
-                <CardTitle className="flex items-center gap-2">
-                  <Network className="size-4 text-primary" /> Graph inspector
-                </CardTitle>
-                <CardDescription>
-                  Pan and zoom the graph evidence supplied to this answer.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
+          <aside className="min-w-0 space-y-6 self-start">
+            <AccordionPanel
+              title="Graph inspector"
+              description="Pan and zoom the graph evidence supplied to this answer."
+              icon={<Network className="size-4 text-primary" />}
+            >
+              <div className="px-6 pb-6">
                 <GraphInspector subgraph={subgraph} />
                 <Separator className="my-5" />
                 <div className="space-y-2.5">
@@ -764,8 +756,13 @@ export default function App() {
                     ))
                   )}
                 </div>
-              </CardContent>
-            </Card>
+              </div>
+            </AccordionPanel>
+            <EvidencePanel
+              sources={sources}
+              parents={parents}
+              sourceCount={sourceCount}
+            />
           </aside>
         </div>
       </section>
@@ -1168,15 +1165,12 @@ function EvidencePanel({
   sourceCount: number;
 }) {
   return (
-    <Card className="product-card border-foreground/15 bg-card/95 shadow-none">
-      <CardHeader>
-        <CardTitle>Evidence trail</CardTitle>
-        <CardDescription>
-          Open a citation to inspect the exact retrieved excerpt and parent
-          context.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
+    <AccordionPanel
+      title="Evidence trail"
+      description="Open a citation to inspect the exact retrieved excerpt and parent context."
+      icon={<FileText className="size-4 text-primary" />}
+    >
+      <div className="space-y-3 px-6 pb-6">
         <details
           className="group rounded-sm border bg-background/45 p-4"
           open={sources.length > 0}
@@ -1234,7 +1228,41 @@ function EvidencePanel({
             ))}
           </div>
         </details>
-      </CardContent>
-    </Card>
+      </div>
+    </AccordionPanel>
+  );
+}
+
+function AccordionPanel({
+  title,
+  description,
+  icon,
+  children,
+}: {
+  title: string;
+  description: string;
+  icon: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <details
+      open
+      className="group product-card overflow-hidden border border-foreground/15 bg-card/95 shadow-none"
+    >
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-4 border-b border-foreground/12 px-6 py-5 marker:hidden [&::-webkit-details-marker]:hidden">
+        <span className="min-w-0">
+          <span className="flex items-center gap-2 font-semibold tracking-tight">
+            {icon} {title}
+          </span>
+          <span className="mt-1.5 block text-sm leading-5 text-muted-foreground">
+            {description}
+          </span>
+        </span>
+        <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-sm border border-foreground/15 bg-background/60 text-muted-foreground transition-transform group-open:rotate-180">
+          <ChevronDown className="size-4" />
+        </span>
+      </summary>
+      <div className="pt-6">{children}</div>
+    </details>
   );
 }
