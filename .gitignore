@@ -12,6 +12,7 @@ frontend/.vite/
 # Local configuration and runtime data
 .env
 **/.env
+**/.env.*
 *.log
 qdrant_data/
 neo4j_data/
