@@ -14,6 +14,8 @@ from app.providers import embedding_provider_for, vector_store_for
 from app.schemas import (
     ClearKnowledgeBaseResponse,
     DeleteDocumentResponse,
+    KnowledgeBaseDocument,
+    KnowledgeBaseDocumentsResponse,
     IngestRequest,
     IngestResponse,
     KnowledgeBaseUsageResponse,
@@ -114,11 +116,13 @@ async def ingest_pdf(
     summary="Remove a document's chunks and graph relationships",
 )
 async def delete_document(source_id: str) -> DeleteDocumentResponse:
-    service = get_ingestion_service()
-    vectors_removed = await service.vector_store.prune_document(source_id, keep_ingest_run_id=None)
+    local_service = get_ingestion_service("local")
+    openrouter_service = get_ingestion_service("openrouter")
+    vectors_removed = await local_service.vector_store.prune_document(source_id, keep_ingest_run_id=None)
+    vectors_removed += await openrouter_service.vector_store.prune_document(source_id, keep_ingest_run_id=None)
     relationships_removed = 0
-    if service.graph_store is not None:
-        relationships_removed = await service.graph_store.prune_document(
+    if local_service.graph_store is not None:
+        relationships_removed = await local_service.graph_store.prune_document(
             source_id, keep_ingest_run_id=None
         )
     return DeleteDocumentResponse(
@@ -126,6 +130,24 @@ async def delete_document(source_id: str) -> DeleteDocumentResponse:
         vectors_removed=vectors_removed,
         relationships_removed=relationships_removed,
     )
+
+
+@router.get(
+    "/knowledge-base/documents",
+    response_model=KnowledgeBaseDocumentsResponse,
+    summary="List indexed documents",
+)
+async def knowledge_base_documents() -> KnowledgeBaseDocumentsResponse:
+    services = [("local", get_ingestion_service("local")), ("openrouter", get_ingestion_service("openrouter"))]
+    merged: dict[str, KnowledgeBaseDocument] = {}
+    for provider, service in services:
+        for source_id, parents, children, file_sha in await service.vector_store.documents():
+            item = merged.setdefault(source_id, KnowledgeBaseDocument(source_id=source_id))
+            item.providers.append(provider)
+            item.parent_vectors += parents
+            item.child_vectors += children
+            item.file_sha256 = item.file_sha256 or file_sha
+    return KnowledgeBaseDocumentsResponse(documents=sorted(merged.values(), key=lambda item: item.source_id.casefold()))
 
 
 @router.delete(

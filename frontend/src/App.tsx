@@ -35,9 +35,12 @@ import {
   fetchKnowledgeBaseUsage,
   cancelIngestion,
   clearKnowledgeBase,
+  deleteKnowledgeBaseDocument,
+  fetchKnowledgeBaseDocuments,
   ingestPdf,
   type ModelProvider,
   type KnowledgeBaseUsage,
+  type KnowledgeBaseDocument,
   streamChat,
   subgraphFromTriples,
 } from "@/lib/api";
@@ -169,6 +172,8 @@ export default function App() {
   const [confirmClearBrowser, setConfirmClearBrowser] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState("");
   const [knowledgeBaseUsage, setKnowledgeBaseUsage] = useState<KnowledgeBaseUsage | null>(null);
+  const [knowledgeBaseDocuments, setKnowledgeBaseDocuments] = useState<KnowledgeBaseDocument[]>([]);
+  const [deletingDocument, setDeletingDocument] = useState<string | null>(null);
   const [loadingKnowledgeBaseUsage, setLoadingKnowledgeBaseUsage] = useState(false);
   const streamRef = useRef<AbortController | null>(null);
   const ingestionRef = useRef<{
@@ -237,8 +242,11 @@ export default function App() {
   useEffect(() => {
     if (!settingsOpen) return;
     setLoadingKnowledgeBaseUsage(true);
-    void fetchKnowledgeBaseUsage()
-      .then(setKnowledgeBaseUsage)
+    void Promise.all([fetchKnowledgeBaseUsage(), fetchKnowledgeBaseDocuments()])
+      .then(([usage, documents]) => {
+        setKnowledgeBaseUsage(usage);
+        setKnowledgeBaseDocuments(documents);
+      })
       .catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load knowledge-base usage"))
       .finally(() => setLoadingKnowledgeBaseUsage(false));
   }, [settingsOpen]);
@@ -429,6 +437,7 @@ export default function App() {
       const fresh = createConversation();
       setWorkspace({ conversations: [fresh], activeConversationId: fresh.id });
       setKnowledgeBaseUsage(EMPTY_KNOWLEDGE_BASE_USAGE);
+      setKnowledgeBaseDocuments([]);
       const notice = `Knowledge base and saved browser evidence cleared: ${result.vectors_removed} vectors, ${result.relationships_removed} relationships, and ${result.entities_removed} entities removed.`;
       setUploadStatus(notice);
       setSettingsNotice(notice);
@@ -437,6 +446,22 @@ export default function App() {
       setError(caught instanceof Error ? caught.message : "Could not clear the knowledge base");
     } finally {
       setClearingKnowledgeBase(false);
+    }
+  }
+
+  async function deleteKnowledgeBasePdf(sourceId: string) {
+    setDeletingDocument(sourceId);
+    setError("");
+    try {
+      const result = await deleteKnowledgeBaseDocument(sourceId);
+      const [usage, documents] = await Promise.all([fetchKnowledgeBaseUsage(), fetchKnowledgeBaseDocuments()]);
+      setKnowledgeBaseUsage(usage);
+      setKnowledgeBaseDocuments(documents);
+      setSettingsNotice(`Removed ${sourceId}: ${result.vectors_removed} vector records and ${result.relationships_removed} graph relationships.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not remove document");
+    } finally {
+      setDeletingDocument(null);
     }
   }
 
@@ -789,6 +814,8 @@ export default function App() {
           notice={settingsNotice}
           indexing={isIndexing}
           usage={knowledgeBaseUsage}
+          documents={knowledgeBaseDocuments}
+          deletingDocument={deletingDocument}
           loadingUsage={loadingKnowledgeBaseUsage}
           onClose={() => {
             setConfirmClear(false);
@@ -801,6 +828,7 @@ export default function App() {
           onRequestClearBrowser={() => setConfirmClearBrowser(true)}
           onCancelClearBrowser={() => setConfirmClearBrowser(false)}
           onConfirmClearBrowser={clearBrowserSession}
+          onDeleteDocument={deleteKnowledgeBasePdf}
         />
       )}
     </main>
@@ -901,6 +929,8 @@ function SettingsPage({
   indexing,
   notice,
   usage,
+  documents,
+  deletingDocument,
   loadingUsage,
   onClose,
   onRequestClear,
@@ -909,6 +939,7 @@ function SettingsPage({
   onRequestClearBrowser,
   onCancelClearBrowser,
   onConfirmClearBrowser,
+  onDeleteDocument,
 }: {
   confirmClear: boolean;
   clearing: boolean;
@@ -916,6 +947,8 @@ function SettingsPage({
   indexing: boolean;
   notice: string;
   usage: KnowledgeBaseUsage | null;
+  documents: KnowledgeBaseDocument[];
+  deletingDocument: string | null;
   loadingUsage: boolean;
   onClose: () => void;
   onRequestClear: () => void;
@@ -924,6 +957,7 @@ function SettingsPage({
   onRequestClearBrowser: () => void;
   onCancelClearBrowser: () => void;
   onConfirmClearBrowser: () => void;
+  onDeleteDocument: (sourceId: string) => void;
 }) {
   return (
     <div className="fixed inset-0 z-40 overflow-y-auto bg-background/95 px-4 py-5 backdrop-blur-sm sm:px-6 sm:py-8 md:px-8 md:py-12">
@@ -952,6 +986,33 @@ function SettingsPage({
             <UsageMetric label="Qdrant child vectors" value={usage?.qdrant_child_vectors} loading={loadingUsage} />
             <UsageMetric label="Neo4j entities" value={usage?.neo4j_entities} loading={loadingUsage} />
             <UsageMetric label="Neo4j relationships" value={usage?.neo4j_relationships} loading={loadingUsage} />
+          </CardContent>
+        </Card>
+        <Card className="mb-6 bg-card">
+          <CardHeader>
+            <CardTitle>Indexed documents</CardTitle>
+            <CardDescription>Remove one PDF without affecting the rest of the knowledge base.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {loadingUsage ? <Skeleton className="h-12 w-full" /> : documents.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No indexed PDFs found.</p>
+            ) : (
+              <div className="space-y-2">
+                {documents.map((document) => (
+                  <div key={document.source_id} className="flex flex-col gap-3 rounded-lg border bg-background/55 p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium" title={document.source_id}>{document.source_id}</p>
+                      <p className="text-xs text-muted-foreground">{document.parent_vectors} parent · {document.child_vectors} child vectors · {document.providers.join(" + ")}</p>
+                    </div>
+                    <Button type="button" variant="outline" size="sm" className="shrink-0 text-destructive hover:text-destructive" disabled={indexing || deletingDocument !== null} onClick={() => {
+                      if (window.confirm(`Remove ${document.source_id} from the knowledge base?`)) onDeleteDocument(document.source_id);
+                    }}>
+                      <Trash2 /> {deletingDocument === document.source_id ? "Removing…" : "Remove PDF"}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
         {notice && (

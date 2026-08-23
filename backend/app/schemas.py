@@ -72,6 +72,18 @@ class DeleteDocumentResponse(BaseModel):
     relationships_removed: int
 
 
+class KnowledgeBaseDocument(BaseModel):
+    source_id: str
+    providers: list[LLMProvider] = Field(default_factory=list)
+    parent_vectors: int = 0
+    child_vectors: int = 0
+    file_sha256: str | None = None
+
+
+class KnowledgeBaseDocumentsResponse(BaseModel):
+    documents: list[KnowledgeBaseDocument]
+
+
 class ClearKnowledgeBaseResponse(BaseModel):
     vectors_removed: int
     relationships_removed: int

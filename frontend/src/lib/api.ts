@@ -138,6 +138,14 @@ export type KnowledgeBaseUsage = {
   neo4j_relationships: number;
 };
 
+export type KnowledgeBaseDocument = {
+  source_id: string;
+  providers: ModelProvider[];
+  parent_vectors: number;
+  child_vectors: number;
+  file_sha256?: string | null;
+};
+
 export type IngestOptions = {
   fetchImpl?: Fetcher;
   /** Optional test/automation safety cap. Interactive indexing has no deadline. */
@@ -240,6 +248,27 @@ export async function fetchKnowledgeBaseUsage(
   const response = await request(`${API_BASE}/knowledge-base/usage`);
   const result = (await readJsonResponse(response)) as KnowledgeBaseUsage & { detail?: string };
   if (!response.ok) throw new Error(result.detail ?? "Could not load knowledge-base usage");
+  return result;
+}
+
+export async function fetchKnowledgeBaseDocuments(
+  options: { fetchImpl?: Fetcher } = {},
+): Promise<KnowledgeBaseDocument[]> {
+  const request = options.fetchImpl ?? fetch;
+  const response = await request(`${API_BASE}/knowledge-base/documents`);
+  const result = (await readJsonResponse(response)) as { documents?: KnowledgeBaseDocument[]; detail?: string };
+  if (!response.ok) throw new Error(result.detail ?? "Could not load indexed documents");
+  return result.documents ?? [];
+}
+
+export async function deleteKnowledgeBaseDocument(
+  sourceId: string,
+  options: { fetchImpl?: Fetcher } = {},
+): Promise<{ source_id: string; vectors_removed: number; relationships_removed: number }> {
+  const request = options.fetchImpl ?? fetch;
+  const response = await request(`${API_BASE}/documents/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+  const result = (await readJsonResponse(response)) as { detail?: string; source_id: string; vectors_removed: number; relationships_removed: number };
+  if (!response.ok) throw new Error(result.detail ?? "Could not remove document");
   return result;
 }
 

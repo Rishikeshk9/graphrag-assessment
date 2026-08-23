@@ -55,6 +55,8 @@ class VectorStore(Protocol):
 
     async def usage(self) -> tuple[int, int]: ...
 
+    async def documents(self) -> list[tuple[str, int, int, str | None]]: ...
+
     async def count_indexed_children(self, source_id: str, content_sha256: str) -> int: ...
 
     async def find_source_by_file(self, file_sha256: str) -> str | None: ...
@@ -235,6 +237,33 @@ class QdrantVectorStore:
 
     async def usage(self) -> tuple[int, int]:
         return await asyncio.to_thread(self._usage)
+
+    def _documents(self) -> list[tuple[str, int, int, str | None]]:
+        """List source ids and their parent/child counts from payload metadata."""
+        counts: dict[str, list[object]] = {}
+        for collection, index in ((self.parents_collection, 1), (self.children_collection, 2)):
+            if not self.client.collection_exists(collection):
+                continue
+            offset = None
+            while True:
+                points, offset = self.client.scroll(
+                    collection, offset=offset, limit=256, with_payload=True, with_vectors=False
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    source = str(payload.get("source_id", ""))
+                    if not source:
+                        continue
+                    row = counts.setdefault(source, [0, 0, None])
+                    row[index - 1] = int(row[index - 1]) + 1
+                    if payload.get("file_sha256"):
+                        row[2] = str(payload["file_sha256"])
+                if offset is None:
+                    break
+        return [(source, int(row[0]), int(row[1]), row[2]) for source, row in counts.items()]
+
+    async def documents(self) -> list[tuple[str, int, int, str | None]]:
+        return await asyncio.to_thread(self._documents)
 
     def _count_indexed_children(self, source_id: str, content_sha256: str) -> int:
         if not self.client.collection_exists(self.children_collection):
